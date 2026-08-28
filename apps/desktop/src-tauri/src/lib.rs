@@ -1,9 +1,4 @@
-//! The Tauri shell.
-//!
-//! **This crate adds no domain logic.** Every decision about what is eligible,
-//! what runs, and in what order was made in `crates/engine`; the commands in
-//! [`commands`] are thin wrappers that send a `Cmd` and await the reply. If a
-//! rule needs writing here, it belongs in the engine.
+//! The Tauri shell. See `docs/README.md`.
 
 pub mod commands;
 pub mod config;
@@ -19,11 +14,8 @@ pub use error::{BridgeError, ErrorKind};
 pub use events::CHANNEL as EVENT_CHANNEL;
 pub use menu::CHANNEL as MENU_CHANNEL;
 
-/// The command surface, in one place.
-///
-/// A macro rather than a list written twice: `run` needs it and so does the
-/// test that drives it, and two lists would let a command be shipped untested
-/// or tested but unshipped.
+/// The command surface, in one place. Used by both `run` and the test that
+/// drives it.
 #[macro_export]
 macro_rules! command_handler {
     () => {
@@ -58,27 +50,17 @@ macro_rules! command_handler {
     };
 }
 
-// Aliased: there are two `Config` types in play — the engine's limits and
-// policy, and the roots this application persists.
 use git_scylla_engine::{Config as EngineConfig, Engine};
 use state::App;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        // The native folder picker for root management. No security-scoped
-        // bookmarks: this is a non-sandboxed local build.
         .plugin(tauri_plugin_dialog::init())
-        // Only to open the Full Disk Access pane of System Settings.
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             use tauri::Manager;
-            // `Engine::start` spawns onto the ambient tokio runtime, so it has
-            // to be constructed inside one. Tauri's async runtime is tokio;
-            // `block_on` enters it.
             let engine = tauri::async_runtime::block_on(async {
-                // The cache is the shell's: a warm launch shows rows before it
-                // has a scan. The CLI leaves it off.
                 Engine::start(EngineConfig {
                     cache: git_scylla_engine::CacheMode::ReadWrite,
                     ..EngineConfig::default()
@@ -89,8 +71,6 @@ pub fn run() {
             let state = App::new(engine, config::load());
             let (handle, watcher) = (state.engine.clone(), std::sync::Arc::clone(&state.watcher));
             app.manage(state);
-            // The watcher itself starts with the first scan, which is where the
-            // roots arrive; this only keeps its index current afterwards.
             watch::follow_scans(handle, watcher);
             Ok(())
         })

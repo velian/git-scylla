@@ -1,8 +1,5 @@
-//! Bridging the engine's broadcast channel to the webview.
-//!
-//! Batched on a 50 ms tick. One `app.emit` per repository probed would be
-//! wasteful even at this scale, and — more to the point — React would re-render
-//! per event rather than per frame.
+//! Bridging the engine's broadcast channel to the webview. Batched on a
+//! 50 ms tick, so React re-renders per frame rather than per event.
 
 use crate::row::RepoRow;
 use git_scylla_core::{BatchId, BatchSummary, RepoId, RepoSnapshot};
@@ -15,24 +12,13 @@ use tauri::{AppHandle, Emitter};
 /// The channel the frontend listens on.
 pub const CHANNEL: &str = "engine://events";
 
-/// What the webview receives.
-///
-/// Everything the engine publishes, except that snapshots arrive as **rows**:
-/// the grid needs the derived `Badge` for display and for its default sort, and
-/// deriving it in TypeScript would put a piece of the domain in the frontend.
-///
-/// A wrapper rather than a parallel copy of `Event`, so the enum's shape is
-/// written down once and a passthrough arm cannot fall behind it.
+/// What the webview receives: `Event`, except snapshots arrive as grid rows
+/// and a finished batch carries its rendered summary line.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(tag = "type", content = "value")]
 pub enum UiEvent {
-    /// Projected from `Event::ReposUpserted`.
     Rows(Vec<RepoRow>),
-    /// Projected from `Event::BatchDone`, for the same reason `Rows` is: the
-    /// drawer's banner has to be the sentence the CLI prints, and re-assembling
-    /// it from the counts on the other side would be a second shape free to
-    /// drift from the first.
     BatchDone {
         id: BatchId,
         summary: BatchSummary,
@@ -40,7 +26,6 @@ pub enum UiEvent {
         /// [`BatchSummary::render`].
         line: String,
     },
-    /// Everything else, verbatim.
     Engine(Event),
 }
 
@@ -72,9 +57,6 @@ pub fn forward(app: AppHandle, engine: EngineHandle) {
             tokio::select! {
                 received = events.recv() => match received {
                     Ok(event) => batch.push(event),
-                    // The receiver fell behind. Dropping events silently would
-                    // leave the grid showing stale rows forever, so say so and
-                    // let the frontend re-read the snapshot.
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!(dropped = n, "event receiver lagged");
                         batch.push(Event::Lagged);
@@ -90,7 +72,6 @@ pub fn forward(app: AppHandle, engine: EngineHandle) {
                         .map(UiEvent::from)
                         .collect();
                     if app.emit(CHANNEL, &payload).is_err() {
-                        // The window is gone.
                         break;
                     }
                 }
@@ -99,18 +80,11 @@ pub fn forward(app: AppHandle, engine: EngineHandle) {
     });
 }
 
-/// Collapse a tick's worth of events.
-///
-/// Only the two high-frequency kinds are merged, and both merge losslessly for
-/// a consumer that just wants current state: a scan of a hundred repositories
-/// produces a hundred `ReposUpserted` and a hundred `ScanProgress` in a couple
-/// of ticks, and the frontend needs the last of each, not all of them.
-/// Everything else is a discrete thing that happened and is passed through in
+/// Collapse a tick's worth of events. `ReposUpserted` and `ScanProgress` are
+/// merged to their latest value per key; everything else passes through in
 /// order.
 fn coalesce(events: Vec<Event>) -> Vec<Event> {
     let mut out: Vec<Event> = Vec::with_capacity(events.len());
-    // Keyed by repository so the newest snapshot for each wins, and inserted at
-    // the position of the first upsert so ordering against other events holds.
     let mut upserts: HashMap<RepoId, RepoSnapshot> = HashMap::new();
     let mut upsert_slot: Option<usize> = None;
     let mut progress_slot: HashMap<_, usize> = HashMap::new();
@@ -126,12 +100,9 @@ fn coalesce(events: Vec<Event>) -> Vec<Event> {
                     out.push(Event::ReposUpserted(Vec::new()));
                 }
             }
-            // Merging upserts into one slot works only while nothing between
-            // them cares about the order. A removal does: a repository re-read,
-            // removed, and re-read again would otherwise have its removal
-            // ordered *after* both upserts and be dropped on the strength of
-            // the middle fact. So the accumulated upserts are flushed ahead of
-            // it and a fresh slot opens behind it.
+            // A removal must not be reordered relative to the upserts around
+            // it, so the accumulated upserts flush ahead of it and a fresh
+            // slot opens behind it.
             Event::ReposRemoved(ids) => {
                 for id in &ids {
                     upserts.remove(id);
@@ -157,8 +128,6 @@ fn coalesce(events: Vec<Event>) -> Vec<Event> {
 fn flush(out: &mut [Event], upserts: &mut HashMap<RepoId, RepoSnapshot>, slot: &mut Option<usize>) {
     let Some(i) = slot.take() else { return };
     let mut snaps: Vec<RepoSnapshot> = std::mem::take(upserts).into_values().collect();
-    // Deterministic order, so a re-render does not reshuffle rows the grid has
-    // not been told to reorder.
     snaps.sort_by(|a, b| a.path.cmp(&b.path));
     out[i] = Event::ReposUpserted(snaps);
 }

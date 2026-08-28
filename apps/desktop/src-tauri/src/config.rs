@@ -1,37 +1,21 @@
-//! The roots the user has chosen, and where they are kept.
-//!
-//! Plain paths — no security-scoped bookmarks. This is a non-sandboxed local
-//! build, so a path is a path and stays valid across launches.
+//! The persisted configuration: roots, editor, terminal, custom commands.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Everything persisted between launches.
-///
-/// Only roots today. The struct exists rather than a bare `Vec<PathBuf>` so
-/// that adding a setting later is a field rather than a file-format change.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(default)]
 pub struct Config {
     pub roots: Vec<PathBuf>,
-    /// Application to open a repository in, by name as `open -a` understands it
-    /// — "Visual Studio Code", "Zed". `None` falls back to `$EDITOR`, which for
-    /// most people is a terminal program and will not work, so the row's menu
-    /// says so rather than failing silently.
+    /// Application to open a repository in, by name as `open -a` understands
+    /// it — "Visual Studio Code", "Zed". `None` falls back to `$EDITOR`.
     pub editor: Option<String>,
     /// Application to open a repository's terminal in, by name as `open -a`
     /// understands it — "Ghostty", "iTerm". `None` is resolved by
-    /// `handoff::terminal_app`, which always has an answer, so this differs
-    /// from `editor`: leaving it unset is a working configuration rather than a
-    /// missing one. The settings dialog shows what the resolution picked, so
-    /// the guess is visible.
+    /// `handoff::terminal_app`, which always has an answer.
     pub terminal: Option<String>,
-    /// Named custom commands.
-    ///
-    /// The deliberate escape hatch from the closed `Action` enum, which will not
-    /// cover everything. The alternative is a shell loop with no plan, no
-    /// transcript and no per-repository results.
     pub custom: Vec<CustomCommand>,
 }
 
@@ -41,29 +25,17 @@ pub struct Config {
 #[serde(default)]
 pub struct CustomCommand {
     pub name: String,
-    /// An argv vector, **never a shell string**. No shell, no interpolation, no
-    /// injection surface — which is the whole reason this is safe to save and
-    /// re-run across forty repositories.
+    /// An argv vector, **never a shell string**.
     pub args: Vec<String>,
-    /// Which semaphore it takes, and whether `head_before` is recorded. The
-    /// engine cannot reason about an arbitrary command; whoever wrote the
-    /// definition can.
+    /// Which semaphore it takes, and whether `head_before` is recorded.
     pub network: bool,
     pub mutating: bool,
-    /// The user has been told, once, that preconditions and undo do not apply.
-    ///
-    /// Persisted **per definition** rather than per session: the point is that
-    /// somebody read what this particular command does not get, not that they
-    /// clicked through a dialog recently. A definition whose argv is edited has
-    /// its acknowledgement cleared, because the thing they agreed to has
-    /// changed.
+    /// Persisted per definition: an edit to `args` clears it.
     pub acknowledged: bool,
 }
 
 impl Default for CustomCommand {
     fn default() -> Self {
-        // The conservative pair, matching `Action::Custom`'s own default when
-        // nobody has said: the scarcer semaphore, and a recorded `head_before`.
         Self {
             name: String::new(),
             args: Vec::new(),
@@ -75,10 +47,8 @@ impl Default for CustomCommand {
 }
 
 impl Config {
-    /// Save or replace a custom command by name.
-    ///
-    /// Editing the argv clears the acknowledgement: what the user agreed to was
-    /// *this command*, and a different one has not been agreed to.
+    /// Save or replace a custom command by name. An edit to `args` clears
+    /// `acknowledged`.
     pub fn put_custom(&mut self, mut command: CustomCommand) {
         match self.custom.iter_mut().find(|c| c.name == command.name) {
             Some(existing) => {
@@ -100,12 +70,8 @@ impl Config {
 }
 
 impl Config {
-    /// Add a root, ignoring one already covered.
-    ///
-    /// Returns whether anything changed. A root nested inside an existing one
-    /// is rejected: the walk would find the same repositories twice and the
-    /// sidebar would double-count them. A root that *contains* existing ones
-    /// replaces them, because the broader choice is clearly the intent.
+    /// Add a root. Rejects one nested inside an existing root; a root that
+    /// contains existing ones replaces them. Returns whether anything changed.
     pub fn add_root(&mut self, root: PathBuf) -> bool {
         if self.roots.iter().any(|r| root.starts_with(r)) {
             return false;
@@ -123,25 +89,17 @@ impl Config {
     }
 }
 
-/// The file, under the state directory `crates/store` resolves.
 const FILE: &str = "config.json";
 
 pub fn path() -> Option<PathBuf> {
     git_scylla_store::path(FILE)
 }
 
-/// Read the stored configuration, or the default.
-///
-/// A missing or unreadable file is not an error: the first launch has no
-/// configuration, and a corrupt one should leave the application usable rather
-/// than refusing to start. It is logged by the store and replaced on the next
-/// write.
+/// Read the stored configuration, or the default if missing or unreadable.
 pub fn load() -> Config {
     git_scylla_store::load_json(FILE).unwrap_or_default()
 }
 
-/// Write the configuration, atomically — see `git_scylla_store::write_atomic`
-/// for why that matters for a file read at launch.
 pub fn save(config: &Config) -> Result<(), git_scylla_store::StoreError> {
     git_scylla_store::save_json(FILE, config)
 }
@@ -171,9 +129,6 @@ mod tests {
 
     #[test]
     fn editing_the_argv_clears_the_acknowledgement() {
-        // What the user agreed to was *this command*. A different one has not
-        // been agreed to, and the acknowledgement is the only thing standing
-        // between a saved definition and forty repositories.
         let mut c = Config::default();
         c.put_custom(CustomCommand {
             name: "thing".into(),
@@ -192,7 +147,6 @@ mod tests {
 
     #[test]
     fn renaming_leaves_the_acknowledgement_alone() {
-        // Only the argv is what was agreed to. A rename is bookkeeping.
         let mut c = Config::default();
         c.put_custom(CustomCommand {
             name: "thing".into(),
@@ -211,8 +165,6 @@ mod tests {
 
     #[test]
     fn a_root_inside_an_existing_one_is_not_added_twice() {
-        // The walk would find the same repositories under both, and the sidebar
-        // would show them under each.
         let mut c = Config::default();
         assert!(c.add_root("/work".into()));
         assert!(!c.add_root("/work/api".into()));
@@ -238,7 +190,6 @@ mod tests {
 
     #[test]
     fn a_sibling_with_a_shared_prefix_is_not_treated_as_nested() {
-        // `/work-old` starts with the *string* `/work` but is not inside it.
         let mut c = Config::default();
         c.add_root("/work".into());
         assert!(c.add_root("/work-old".into()));
@@ -256,8 +207,6 @@ mod tests {
 
     #[test]
     fn a_corrupt_file_leaves_the_application_usable() {
-        // Refusing to start because a settings file is malformed would be a
-        // worse outcome than losing the setting.
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("GIT_SCYLLA_STATE_DIR", tmp.path());
         std::fs::write(tmp.path().join("config.json"), b"{ not json").unwrap();
