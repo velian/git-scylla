@@ -1,24 +1,19 @@
 //! Reading remote names and hosts out of `config`.
 //!
-//! A file read rather than `git remote -v`: this is needed only as the per-host
-//! concurrency bucket key for automatic fetching, and a second subprocess per
-//! repository would double the cost of the scan to buy nothing. Two
-//! consequences, both accepted:
+//! A file read rather than `git remote -v`, since the host is only a
+//! concurrency-bucket key for automatic fetching. Two consequences:
 //!
-//! * `url.<base>.insteadOf` rewrites are **not** applied, so a rewritten URL
-//!   buckets under the host it is written as. The key feeds a semaphore, never a
-//!   correctness decision, so a miss costs throughput and nothing else.
-//! * `[include]` / `[includeIf]` directives are not followed. A remote defined
-//!   only in an included file is invisible here.
+//! * `url.<base>.insteadOf` rewrites are not applied; a rewritten URL buckets
+//!   under the host it is written as.
+//! * `[include]` / `[includeIf]` directives are not followed; a remote
+//!   defined only in an included file is invisible here.
 
 use git_scylla_core::Remote;
 use std::path::Path;
 
 /// Parse the `[remote "<name>"] url = ...` stanzas of a git config file.
 ///
-/// Deliberately a minimal INI reader rather than a general one: we want exactly
-/// two things out of this file, and every additional feature is a way to be
-/// wrong about a file we do not own.
+/// A minimal INI reader, not a general one: only remote names and URLs.
 pub fn parse_remotes(config_path: &Path) -> Vec<Remote> {
     let Ok(text) = std::fs::read_to_string(config_path) else {
         return Vec::new();
@@ -37,8 +32,6 @@ pub(crate) fn parse_remotes_str(text: &str) -> Vec<Remote> {
         }
         if let Some(section) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
             current = remote_name(section);
-            // A remote with no URL is still a remote git knows about; record it
-            // now so ordering in the file cannot lose it.
             if let Some(name) = &current {
                 if !out.iter().any(|r| &r.name == name) {
                     out.push(Remote { name: name.clone(), host: None });
@@ -48,14 +41,10 @@ pub(crate) fn parse_remotes_str(text: &str) -> Vec<Remote> {
         }
         let Some(name) = &current else { continue };
         let Some((key, value)) = line.split_once('=') else { continue };
-        // `url` is the fetch URL. `pushurl` deliberately ignored: fetching is
-        // what buckets by host, and a push-only host is a different question.
+        // `pushurl` is ignored: fetching is what buckets by host.
         if key.trim().eq_ignore_ascii_case("url") {
             let host = host_of_url(unquote(value.trim()));
             if let Some(r) = out.iter_mut().find(|r| &r.name == name) {
-                // First URL wins; git itself uses the last, but a remote with
-                // two fetch URLs is misconfigured and either answer buckets it
-                // somewhere reasonable.
                 if r.host.is_none() {
                     r.host = host;
                 }
@@ -73,8 +62,6 @@ fn remote_name(section: &str) -> Option<String> {
 }
 
 fn strip_comment(line: &str) -> &str {
-    // Not quote-aware. A `#` inside a quoted URL would truncate it, and the
-    // consequence is a bucket miss, which is survivable (see the module note).
     match line.find(['#', ';']) {
         Some(i) => &line[..i],
         None => line,
@@ -87,10 +74,9 @@ fn unquote(v: &str) -> &str {
 
 /// Extract the host from a git remote URL.
 ///
-/// Handles the three forms git accepts, in the order they can be distinguished:
-/// a real URL with a scheme, the `scp`-like `[user@]host:path`, and a local
-/// path. Local paths and `file://` yield `None` — there is no host to rate-limit
-/// against, which is exactly right for the bare-repo "remotes" the fixtures use.
+/// Handles the three forms git accepts: a URL with a scheme, the `scp`-like
+/// `[user@]host:path`, and a local path. Local paths and `file://` yield
+/// `None`.
 pub fn host_of_url(url: &str) -> Option<String> {
     let url = url.trim();
     if url.is_empty() {
@@ -108,11 +94,10 @@ pub fn host_of_url(url: &str) -> Option<String> {
         };
         return normalise_host(hostport);
     }
-    // A local path is never a host, and `~user/path` is a path too.
     if url.starts_with('/') || url.starts_with('.') || url.starts_with('~') {
         return None;
     }
-    // scp-like: the colon must come before any slash, or it is a path with a
+    // scp-like: the colon must precede any slash, or it's a path with a
     // colon in a directory name.
     let colon = url.find(':')?;
     if url[..colon].contains('/') {
@@ -125,15 +110,12 @@ pub fn host_of_url(url: &str) -> Option<String> {
     normalise_host(hostpart)
 }
 
-/// Strip a port and IPv6 brackets, and lowercase — hosts are case-insensitive,
-/// and two spellings of one host must land in one bucket.
+/// Strip a port and IPv6 brackets, and lowercase.
 fn normalise_host(hostport: &str) -> Option<String> {
     let h = hostport.trim();
     let h = if let Some(rest) = h.strip_prefix('[') {
         rest.split(']').next().unwrap_or(rest)
     } else {
-        // Only strip a trailing `:port`; a bare IPv6 without brackets is
-        // indistinguishable from host:port and is not valid in a git URL anyway.
         h.rsplit_once(':').map_or(h, |(host, port)| {
             if port.chars().all(|c| c.is_ascii_digit()) && !port.is_empty() {
                 host
@@ -162,8 +144,6 @@ mod tests {
 
     #[test]
     fn local_remotes_have_no_host() {
-        // The fixtures use local bare repositories as `origin`, so this case is
-        // exercised by every upstream test in the suite.
         assert_eq!(host_of_url("/tmp/fixtures/origin.git"), None);
         assert_eq!(host_of_url("../origin.git"), None);
         assert_eq!(host_of_url("./o.git"), None);
@@ -209,8 +189,6 @@ mod tests {
 
     #[test]
     fn a_local_remote_yields_a_remote_with_no_host() {
-        // Load-bearing: auto-fetch eligibility asks "are there remotes", and the
-        // host is only the bucket. A path remote is fetchable.
         let remotes = parse_remotes_str("[remote \"origin\"]\n\turl = /tmp/o.git\n");
         assert_eq!(remotes.len(), 1);
         assert_eq!(remotes[0].host, None);

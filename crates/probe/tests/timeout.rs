@@ -86,14 +86,10 @@ async fn a_slow_repository_times_out_and_is_not_reported_as_clean() {
     let elapsed = started.elapsed();
 
     assert_eq!(snap.outcome, ProbeOutcome::Timeout);
-    // The badge must not present a repository we failed to read as clean.
     assert_eq!(snap.badge(), git_scylla_core::Badge::Unknown);
     assert!(!snap.is_trustworthy());
     assert!(elapsed < Duration::from_secs(3), "gave up after {elapsed:?}, deadline was 700ms");
 
-    // The hook slept 6 s; wait past that and assert it never finished. A kill
-    // that signalled only `git` would leave the hook running, and this marker
-    // would appear.
     tokio::time::sleep(Duration::from_secs(7)).await;
     assert!(
         !marker.exists(),
@@ -112,9 +108,6 @@ async fn one_slow_repository_does_not_delay_the_others() {
     let started = Instant::now();
 
     let mut tasks = tokio::task::JoinSet::new();
-    // The slow one gets a generous deadline, so it is genuinely still running
-    // while the others are probed. Its deadline is what bounds this test, not
-    // the fast repositories' completion.
     {
         let probe = probe.clone();
         let slow = slow.clone();
@@ -159,8 +152,6 @@ async fn one_slow_repository_does_not_delay_the_others() {
 
     assert_eq!(fast_done, fast.len());
     assert_eq!(slow_outcome, Some(ProbeOutcome::Timeout));
-    // The point of the whole test: the fast repositories finished long before
-    // the slow one's 2 s deadline, rather than queueing behind it.
     assert!(
         fast_elapsed < Duration::from_millis(1500),
         "fast repositories took {fast_elapsed:?}; they were blocked by the slow one"

@@ -16,9 +16,9 @@ use git_scylla_core::{AheadBehind, WorkTree};
 
 /// Everything one `git status` invocation tells us.
 ///
-/// Deliberately a flat parse result rather than a `RepoSnapshot`: the snapshot
-/// also needs facts from the git directory, and keeping the parser free of that
-/// makes it a pure function of a byte buffer.
+/// A flat parse result, not a `RepoSnapshot` — the snapshot also needs facts
+/// from the git directory, so the parser stays a pure function of a byte
+/// buffer.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PorcelainStatus {
     /// `# branch.oid`. `None` for an unborn HEAD, where git emits `(initial)`.
@@ -44,10 +44,9 @@ impl PorcelainStatus {
 
 /// Parse the raw stdout of the status command.
 ///
-/// Unrecognised records are ignored rather than rejected: a future git version
-/// adding a header must not turn every repository into an error. Malformed
-/// *known* records are also ignored, because a miscount is a lesser evil than
-/// refusing to report a repository at all.
+/// Unrecognised or malformed records are ignored rather than rejected, so a
+/// future git version adding a header — or one malformed record — does not
+/// turn a whole repository into an error.
 pub fn parse_porcelain_v2(bytes: &[u8]) -> PorcelainStatus {
     let mut out = PorcelainStatus::default();
     let mut records = bytes.split(|&b| b == 0).filter(|r| !r.is_empty());
@@ -55,21 +54,16 @@ pub fn parse_porcelain_v2(bytes: &[u8]) -> PorcelainStatus {
     while let Some(rec) = records.next() {
         match rec[0] {
             b'#' => parse_header(rec, &mut out),
-            // Ordinary change: `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>`
+            // `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>`
             b'1' => count_xy(rec, &mut out.work),
-            // Rename or copy: same prefix, then `<X><score>`, then TWO paths —
-            // the new one in this record, the original in the next.
+            // Rename/copy: same prefix, then `<X><score>`, then two paths —
+            // the new one here, the original in the next record.
             b'2' => {
                 count_xy(rec, &mut out.work);
-                // Consuming this is the whole reason the loop is a `while let`
-                // over an iterator rather than a `for`.
                 let _original_path = records.next();
             }
-            // Unmerged: the XY field describes the conflict, not staged/worktree.
             b'u' => out.work.conflicted += 1,
             b'?' => out.work.untracked += 1,
-            // Ignored paths. `-unormal` does not ask for them, but `--ignored`
-            // callers exist and an ignored file is not a dirty file.
             b'!' => {}
             _ => {}
         }
@@ -78,7 +72,6 @@ pub fn parse_porcelain_v2(bytes: &[u8]) -> PorcelainStatus {
 }
 
 fn parse_header(rec: &[u8], out: &mut PorcelainStatus) {
-    // Headers are ASCII by construction: `# <key> <value>`.
     let Ok(text) = std::str::from_utf8(rec) else { return };
     let Some(rest) = text.strip_prefix("# ") else { return };
     let (key, value) = match rest.split_once(' ') {
@@ -86,7 +79,6 @@ fn parse_header(rec: &[u8], out: &mut PorcelainStatus) {
         None => (rest, ""),
     };
     match key {
-        // `(initial)` is git's marker for an unborn HEAD, not an object id.
         "branch.oid" => out.oid = (value != "(initial)").then(|| value.to_string()),
         "branch.head" => out.branch = (value != "(detached)").then(|| value.to_string()),
         "branch.upstream" => out.upstream = Some(value.to_string()),
@@ -193,10 +185,6 @@ mod tests {
 
     #[test]
     fn a_rename_consumes_its_second_record() {
-        // The original-path record must not be read as an entry. If it were,
-        // "old-name" would parse as an unknown type and — worse — a following
-        // "?" record would land in the wrong place. The assertion is that the
-        // untracked count is 1 and not 0.
         let s = parse_porcelain_v2(&buf(&[
             "2 R. N... 100644 100644 100644 aaa bbb R100 new-name",
             "old-name",
@@ -221,15 +209,13 @@ mod tests {
 
     #[test]
     fn paths_with_newlines_spaces_and_non_utf8_bytes() {
-        // The exact case a line-oriented parser gets wrong: a path containing a
-        // newline would split one record into two.
         let mut v = Vec::new();
         v.extend_from_slice(
             b"1 .M N... 100644 100644 100644 aaa bbb dir/with a space/and\nnewline",
         );
         v.push(0);
         v.extend_from_slice(b"? bad-");
-        v.extend_from_slice(&[0xff, 0xfe]); // invalid UTF-8 in a filename
+        v.extend_from_slice(&[0xff, 0xfe]);
         v.extend_from_slice(b"-name");
         v.push(0);
         v.extend_from_slice(b"1 M. N... 100644 100644 100644 aaa bbb after");
@@ -241,7 +227,6 @@ mod tests {
 
     #[test]
     fn a_rename_to_a_path_containing_a_nul_is_impossible_but_empty_is_not() {
-        // Trailing NUL produces an empty final record; it must not be parsed.
         let s = parse_porcelain_v2(b"? one\0\0? two\0");
         assert_eq!(s.work.untracked, 2);
     }

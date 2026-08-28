@@ -6,15 +6,10 @@ use std::time::SystemTime;
 
 /// Resolve the *common* git directory.
 ///
-/// A linked worktree's git dir contains a `commondir` file pointing at the main
-/// repository's `.git`. The split matters, and getting it backwards produces
-/// bugs that look random:
-///
-/// * per-worktree, in `git_dir`: `MERGE_HEAD`, `rebase-merge/`, `HEAD`
-/// * shared, in the common dir: `config`, `FETCH_HEAD`, `refs/remotes/`
-///
-/// So a linked worktree mid-rebase must be read from its own git dir, while its
-/// remotes and last-fetch time come from the main repository's.
+/// A linked worktree's git dir contains a `commondir` file pointing at the
+/// main repository's `.git`. `MERGE_HEAD`, `rebase-merge/` and `HEAD` are
+/// per-worktree, in `git_dir`; `config`, `FETCH_HEAD` and `refs/remotes/` are
+/// shared, in the common dir.
 pub fn resolve_common_dir(git_dir: &Path) -> PathBuf {
     let marker = git_dir.join("commondir");
     let Ok(contents) = std::fs::read_to_string(&marker) else {
@@ -31,12 +26,10 @@ pub fn resolve_common_dir(git_dir: &Path) -> PathBuf {
 
 /// Which multi-step operation, if any, is half-finished.
 ///
-/// Marker files in the *per-worktree* git dir. Checked in a fixed order so that
-/// a repository somehow carrying two markers reports deterministically; the
-/// order runs most-obstructive first.
+/// Marker files in the *per-worktree* git dir, checked in a fixed order —
+/// most obstructive first — so a repository carrying two markers reports
+/// deterministically.
 pub fn detect_in_progress(git_dir: &Path) -> Option<InProgress> {
-    // `git rebase --continue` leaves rebase-merge/ (interactive and merge
-    // backends) or rebase-apply/ (the am backend, and `git am` itself).
     if git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir() {
         return Some(InProgress::Rebase);
     }
@@ -58,17 +51,15 @@ pub fn detect_in_progress(git_dir: &Path) -> Option<InProgress> {
 /// When anything last fetched into this repository.
 ///
 /// `FETCH_HEAD`'s mtime is the primary signal and moves for any fetch by
-/// anyone, including the user in their own terminal. The fallback matters for a
-/// repository cloned but never fetched since: `refs/remotes/` exists and carries
-/// the clone time, where `FETCH_HEAD` may not exist at all.
+/// anyone, including the user's own terminal. A repository cloned but never
+/// fetched since has no `FETCH_HEAD`, so the fallback is the newest mtime
+/// among the per-remote directories under `refs/remotes/`.
 pub fn last_fetch(common_dir: &Path) -> Option<SystemTime> {
     if let Ok(md) = std::fs::metadata(common_dir.join("FETCH_HEAD")) {
         if let Ok(t) = md.modified() {
             return Some(t);
         }
     }
-    // Newest mtime among the per-remote directories, not the parent's: the
-    // parent's mtime only moves when a remote is added or removed.
     let entries = std::fs::read_dir(common_dir.join("refs/remotes")).ok()?;
     entries.filter_map(Result::ok).filter_map(|e| e.metadata().ok()?.modified().ok()).max()
 }

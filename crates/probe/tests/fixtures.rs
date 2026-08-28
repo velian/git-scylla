@@ -21,9 +21,6 @@ async fn probe_all(
     let root = scan_root.to_path_buf();
     let walk = tokio::task::spawn_blocking(move || walker.walk(tx));
 
-    // Hermetic: the developer's ~/.gitconfig must not be able to change an
-    // assertion. A global `status.showUntrackedFiles=no` would otherwise turn
-    // every untracked expectation red on one machine and green on another.
     let probe = GitCliProbe::hermetic();
     let mut out = BTreeMap::new();
     while let Some(found) = rx.recv().await {
@@ -71,8 +68,6 @@ async fn every_fixture_produces_its_declared_snapshot() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn every_fixture_probes_successfully() {
-    // Separate from the table assertion so that a probe that fails outright is
-    // reported as such rather than as a hundred field differences.
     let tmp = tempfile::tempdir().unwrap();
     let set = FixtureSet::build(tmp.path()).expect("fixtures");
     for (path, snap) in probe_all(&set.scan_root).await {
@@ -82,9 +77,6 @@ async fn every_fixture_probes_successfully() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_scan_never_creates_an_index_lock() {
-    // `--no-optional-locks` is the whole reason this holds. Without it, `git
-    // status` refreshes the index, takes `index.lock`, and can make the user's
-    // own git operation in another terminal fail.
     let tmp = tempfile::tempdir().unwrap();
     let set = FixtureSet::build(tmp.path()).expect("fixtures");
 
@@ -94,8 +86,8 @@ async fn the_scan_never_creates_an_index_lock() {
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let watcher = {
         let (root, stop) = (set.scan_root.clone(), stop.clone());
-        // Poll for a lock file appearing at any point during the scan, not just
-        // after it: the probe holds one for milliseconds if it holds one at all.
+        // Polls throughout the scan, not just after it: a lock held would
+        // exist for milliseconds at most.
         std::thread::spawn(move || {
             let mut seen = 0;
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
@@ -130,9 +122,6 @@ fn count_index_locks(root: &std::path::Path) -> usize {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_scan_does_not_disturb_a_rebase_in_progress() {
-    // The state a monitoring tool is most likely to break: the user has a
-    // rebase stopped on a conflict, possibly with `git rebase -i`'s editor still
-    // open. Probing it must neither fail nor leave the rebase unfinishable.
     let tmp = tempfile::tempdir().unwrap();
     let set = FixtureSet::build(tmp.path()).expect("fixtures");
     let repo = &set.get("rebase-in-progress").expect("fixture").path;
@@ -143,8 +132,6 @@ async fn the_scan_does_not_disturb_a_rebase_in_progress() {
     assert!(snap.is_trustworthy(), "{:?}", snap.outcome);
     assert_eq!(snap.op, Some(git_scylla_core::InProgress::Rebase));
 
-    // The real assertion: git can still finish what it started. If the scan had
-    // taken a lock, refreshed the index or written state, this fails.
     let out = std::process::Command::new("git")
         .args(["rebase", "--abort"])
         .current_dir(repo)
@@ -161,12 +148,6 @@ async fn the_scan_does_not_disturb_a_rebase_in_progress() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_scan_never_touches_the_network() {
-    // Structural in the probe — one `git status` and some file reads — but worth
-    // asserting behaviourally, because a regression here is invisible until
-    // someone is on a train. First paint must never wait on ssh.
-    //
-    // The remote points at an unroutable address. Anything that tried to reach
-    // it would block for seconds or minutes; the scan must not notice it exists.
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().canonicalize().unwrap();
     let repo = dir.join("black-hole");
@@ -200,11 +181,8 @@ async fn a_scan_never_touches_the_network() {
 
     let snap = &probed[std::path::Path::new("black-hole")];
     assert!(snap.is_trustworthy(), "{:?}", snap.outcome);
-    // The remote was read from config — so the host is known and bucketable —
-    // without ever being contacted.
     assert_eq!(snap.remotes.len(), 1);
     assert_eq!(snap.remotes[0].host.as_deref(), Some("198.51.100.1"));
-    // Upstream is configured but never fetched, so there is no tracking ref.
     assert!(snap.upstream.as_ref().is_some_and(|u| u.is_gone()));
     assert!(
         elapsed < Duration::from_secs(2),
@@ -215,15 +193,6 @@ async fn a_scan_never_touches_the_network() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_probe_always_reports_the_id_it_was_given() {
-    // The property the engine's scan accounting depends on. It tracks a
-    // repository by the id discovery produced, and clears it when a snapshot
-    // arrives — so a probe that resolved its own id independently could return a
-    // different one, and the entry would never clear. That is a hung scan and,
-    // downstream, a `shutdown` that never returns.
-    //
-    // Tested against the awkward case on purpose: the repository is deleted
-    // between discovery and probing, which is exactly when a second
-    // canonicalization would disagree with the first.
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().canonicalize().unwrap();
     let repo = dir.join("doomed");
@@ -242,7 +211,6 @@ async fn a_probe_always_reports_the_id_it_was_given() {
     let found = rx.try_recv().expect("discovered");
     let expected = found.id.clone();
 
-    // Gone before it is read.
     std::fs::remove_dir_all(&repo).unwrap();
 
     let snap = GitCliProbe::hermetic()

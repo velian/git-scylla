@@ -1,15 +1,13 @@
 //! A [`Probe`] whose answers are written down rather than read off a disk.
 //!
-//! Behind the `testkit` feature, beside the trait it implements, so a change to
-//! [`Probe`] breaks it in the same `cargo check` that changed the trait. It is
-//! not in `crates/testkit`: that crate is the specification the real probe is
-//! judged against, and it does not depend on `git-scylla-probe` — making it do
-//! so would point the specification at the thing it judges.
+//! Behind the `testkit` feature, beside the trait it implements, so a change
+//! to [`Probe`] breaks it in the same `cargo check` that changed the trait.
+//! Not in `crates/testkit`, since that crate does not depend on
+//! `git-scylla-probe`.
 //!
-//! What this buys is planning tests without a filesystem. Resolving a
-//! `SyncDefault` needs to know that one repository calls its trunk `master`
-//! and another calls it `main`; proving the engine handles both should not
-//! require two `git init`s, two clones and a push.
+//! Lets planning tests run without a filesystem: a working set where one
+//! repository calls its trunk `master` and another calls it `main` needs no
+//! `git init`, clone, or push to construct.
 
 use crate::git_cli::looks_like_revision;
 use crate::{BoxFuture, Probe, ProbeRequest, RefAnswer, RefError, RefQuery, RefRequest};
@@ -20,9 +18,8 @@ use std::time::SystemTime;
 
 /// One repository as a test wants it to look.
 ///
-/// Built by overriding what the test is about and leaving the rest, the same
-/// bargain [`RepoSnapshot::stub`] offers — a fixture that decided things its
-/// test had no opinion on is how a passing suite stops meaning anything.
+/// Built by overriding what the test is about and leaving the rest at
+/// [`RepoSnapshot::stub`]'s defaults.
 #[derive(Debug, Clone)]
 pub struct FakeRepo {
     path: PathBuf,
@@ -38,16 +35,10 @@ impl FakeRepo {
     /// A normal repository on `main`, with `main` as its default branch, one
     /// remote called `origin`, no tags and no other refs.
     ///
-    /// Two deliberate departures from [`RepoSnapshot::stub`], both because this
-    /// snapshot is served to a *running engine* rather than handed to a pure
-    /// function:
-    ///
-    /// * `probed_at` is now, not the epoch. An engine refuses to act on a stale
-    ///   snapshot, so a permanently-stale fixture could only ever test one skip
-    ///   reason.
-    /// * There is a remote. Without one, `SyncDefault` and a publishing
-    ///   `DevTag` skip with `NoRemote` before any ref question is asked, which
-    ///   is never what a test that built a fake wanted to find out.
+    /// Two departures from [`RepoSnapshot::stub`]: `probed_at` is now, not
+    /// the epoch, since an engine refuses to act on a stale snapshot; and
+    /// there is a remote, since without one `SyncDefault` and a publishing
+    /// `DevTag` skip with `NoRemote` before any ref question is asked.
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
         let mut snapshot = RepoSnapshot::stub(path.clone());
@@ -126,10 +117,8 @@ impl FakeRepo {
 
     /// Does a registered ref answer to this name?
     ///
-    /// Exact, or the DWIM form: a stored `origin/main` answers a question about
-    /// `main`, because `git checkout main` with no local branch creates one
-    /// from it. The real probe does the same, and a fake that did not would
-    /// pass tests the real probe fails.
+    /// Exact, or the DWIM form: a stored `origin/main` answers for `main`,
+    /// matching what `git checkout main` does with no local branch.
     fn has(&self, rev: &str) -> bool {
         self.refs.iter().any(|r| r == rev || r.rsplit_once('/').is_some_and(|(_, b)| b == rev))
     }
@@ -155,13 +144,9 @@ impl FakeProbe {
         self
     }
 
-    /// Create the empty directories discovery needs in order to find these
-    /// repositories.
-    ///
-    /// A `.git` directory is the entire thing the walk looks for; everything it
-    /// would have read out of one comes from this fake instead. So a test gets
-    /// a working set of repositories without `git init`, without clones, and
-    /// without a single subprocess.
+    /// Create the empty `.git` directories discovery needs to find these
+    /// repositories; everything discovery would have read out of one comes
+    /// from this fake instead.
     pub fn scaffold(&self) -> std::io::Result<()> {
         for repo in &self.repos {
             std::fs::create_dir_all(&repo.git_dir)?;
@@ -209,9 +194,8 @@ impl Probe for FakeProbe {
                         RefAnswer::DefaultBranch(repo.default_branch.clone())
                     }
                     RefQuery::Tags => RefAnswer::Tags(repo.tags.clone()),
-                    // The unanswerable-by-filesystem rule is part of the
-                    // contract, not an implementation detail of the real probe:
-                    // a caller that mishandles `None` must fail here too.
+                    // Mirrors the real probe's rule: revision syntax is
+                    // unanswerable here too.
                     RefQuery::Exists { rev } => {
                         RefAnswer::Exists((!looks_like_revision(rev)).then(|| repo.has(rev)))
                     }
