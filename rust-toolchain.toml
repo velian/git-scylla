@@ -1,0 +1,6 @@
+[toolchain]
+# Deliberately not pinned to a patch release: this is a personal local build, and
+# a pin buys reproducibility we are not paying for anywhere else while costing a
+# toolchain download on every machine.
+channel = "stable"
+components = ["rustfmt", "clippy"]

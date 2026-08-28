@@ -1,0 +1,22 @@
+[package]
+name = "git-scylla-exec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+git-scylla-core = { workspace = true }
+tokio = { workspace = true, features = ["process", "rt", "time", "io-util", "macros", "sync"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

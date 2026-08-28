@@ -1,0 +1,27 @@
+[package]
+name = "git-scylla-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# TypeScript generation for the M2 shell. Off by default: it is a build-time
+# concern for one consumer, and every other crate in the workspace pays nothing.
+ts = ["dep:ts-rs"]
+# `RepoSnapshot::stub`, for the test fixtures in other crates. Off by default so
+# a shipped binary cannot construct an invented snapshot; on in the
+# dev-dependencies of everything that tests against one.
+testkit = []
+
+[dependencies]
+serde = { workspace = true }
+ts-rs = { workspace = true, optional = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

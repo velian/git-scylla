@@ -1,0 +1,55 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/discovery",
+    "crates/engine",
+    "crates/exec",
+    "crates/probe",
+    "crates/store",
+    "crates/watch",
+    "crates/testkit",
+    "apps/cli",
+    "apps/desktop/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+git-scylla-core      = { path = "crates/core" }
+git-scylla-discovery = { path = "crates/discovery" }
+git-scylla-engine    = { path = "crates/engine" }
+git-scylla-exec      = { path = "crates/exec" }
+git-scylla-probe     = { path = "crates/probe" }
+git-scylla-store     = { path = "crates/store" }
+git-scylla-watch     = { path = "crates/watch" }
+git-scylla-testkit   = { path = "crates/testkit" }
+
+tokio  = { version = "1", default-features = false }
+tokio-util = "0.7"
+ignore = "0.4"
+# FSEvents on macOS: per-volume and kernel-level, so a large tree costs
+# essentially nothing — unlike kqueue, which needs a descriptor per file.
+notify = "8"
+serde  = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anstyle = "1"
+libc = "0.2"
+tempfile = "3"
+ts-rs = "12"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"

@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: git identity for fixtures
+        # crates/testkit shells out to real git. It pins author/committer per
+        # invocation and isolates HOME, so this is belt-and-braces only.
+        run: git config --global init.defaultBranch main
+      - run: cargo fmt --all --check
+      # The desktop crate is a workspace member, so these cover the Tauri shell
+      # too. It compiles without the frontend having been built — Tauri tolerates
+      # a missing `frontendDist` for a plain `cargo build` — so no npm step is
+      # needed before this.
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all
+
+  frontend:
+    # Separate job: it needs Node rather than Rust, and `tsc` catches a class of
+    # error the Rust build cannot see at all. Deliberately *not* a full
+    # `tauri build` — bundling is minutes of work to prove something the Rust job
+    # already proved, and the signed `.app` is a local concern.
+    #
+    # `vitest` covers the two folds — the scan's and the drawer's — which are
+    # pure functions over the event stream and the only frontend logic that can
+    # be wrong without being visibly wrong.
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  bindings:
+    # The generated TypeScript is only "not hand-written" if it is actually
+    # regenerated. A checked-in artefact nobody re-runs drifts exactly like a
+    # hand-written one, just more quietly.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/bindings.sh --check

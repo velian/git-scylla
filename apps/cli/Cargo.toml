@@ -1,0 +1,31 @@
+[package]
+name = "git-scylla-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "git-scylla"
+path = "src/main.rs"
+
+[dependencies]
+git-scylla-core = { workspace = true }
+git-scylla-engine = { workspace = true }
+git-scylla-store = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anstyle = { workspace = true }
+
+[dev-dependencies]
+git-scylla-core = { workspace = true, features = ["testkit"] }
+git-scylla-testkit = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

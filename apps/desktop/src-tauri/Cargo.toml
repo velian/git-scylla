@@ -1,0 +1,50 @@
+[package]
+name = "git-scylla-desktop"
+description = "git-scylla — operate on many git repositories at once"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# Tauri's mobile targets need a library, and the name must differ from the
+# binary's. Nothing in this project builds for mobile, but keeping the split
+# means the scaffold stays the one Tauri's own tooling expects.
+name = "git_scylla_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+# TypeScript generation, as in the library crates. See scripts/bindings.sh.
+ts = ["dep:ts-rs", "git-scylla-core/ts", "git-scylla-engine/ts"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+git-scylla-core = { workspace = true }
+git-scylla-engine = { workspace = true }
+git-scylla-store = { workspace = true }
+git-scylla-watch = { workspace = true }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+# Only to open the Full Disk Access pane of System Settings. The alternative is
+# spawning `open` from a crate that has no business spawning anything.
+tauri-plugin-opener = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tracing = { workspace = true }
+ts-rs = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Tauri's mock runtime, so the command surface is testable without a window.
+tauri = { version = "2", features = ["test"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

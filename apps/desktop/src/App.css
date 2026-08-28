@@ -1,0 +1,1096 @@
+/*
+ * The shell's own styling. Deliberately small: it is the chrome the grid, the
+ * action bar and the drawer sit inside, not their internals.
+ *
+ * Colours are tokens defined once for light and overridden once for dark. The
+ * window has no `theme` in tauri.conf.json, so macOS decides, and
+ * `prefers-color-scheme` is what carries that decision into the webview.
+ */
+
+:root {
+  --bg: #fbfbfd;
+  --fg: #1d1d1f;
+  --fg-dim: #6e6e73;
+  --line: #d8d8dd;
+  --accent: #0a84ff;
+
+  /* The title bar is Overlay, so content runs underneath it. This is the
+   * height the traffic lights need cleared — see trafficLightPosition. */
+  --titlebar-h: 44px;
+
+  color-scheme: light dark;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1c1e;
+    --fg: #f5f5f7;
+    --fg-dim: #98989d;
+    --line: #38383a;
+    --accent: #0a84ff;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Drags the window by the empty part of the title bar, which an Overlay title
+ * bar does not give you for free. */
+.titlebar {
+  height: var(--titlebar-h);
+  display: flex;
+  align-items: center;
+  /* Clear of the traffic lights at x: 16. */
+  padding-left: 96px;
+  border-bottom: 1px solid var(--line);
+  user-select: none;
+}
+
+.titlebar__name {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.content {
+  padding: 32px;
+  max-width: 120ch;
+}
+
+h1 {
+  font-size: 20px;
+  margin: 0 0 4px;
+  letter-spacing: -0.01em;
+}
+
+p {
+  color: var(--fg-dim);
+  margin: 0 0 16px;
+}
+
+.next {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px 20px;
+}
+
+.next h2 {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-dim);
+  margin: 0 0 8px;
+}
+
+.next ol {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.next li {
+  margin-bottom: 4px;
+}
+
+.next code {
+  font-family: "SF Mono", ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--accent);
+}
+
+/* --- layout: roots on the left, repositories on the right --- */
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.titlebar__status {
+  margin-left: auto;
+  margin-right: 16px;
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+.body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.sidebar {
+  width: 220px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--line);
+  padding: 12px;
+  overflow-y: auto;
+}
+
+.sidebar__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-dim);
+  margin-bottom: 8px;
+}
+
+.sidebar__head button,
+.hint__action {
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.sidebar__empty,
+.muted {
+  color: var(--fg-dim);
+}
+
+.sidebar__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sidebar__root {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.sidebar__rootname {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar__count {
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+
+.sidebar__remove {
+  border: none;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.content {
+  flex: 1;
+  padding: 20px 24px;
+  overflow-y: auto;
+}
+
+.error {
+  color: #ff453a;
+  white-space: pre-wrap;
+}
+
+/* The Full Disk Access hint. Deliberately prominent: it is the difference
+ * between a tool that looks broken and one that says what to do. */
+.hint {
+  border: 1px solid var(--line);
+  border-left: 3px solid #ff9f0a;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin-bottom: 20px;
+  max-width: 62ch;
+}
+
+.hint h2 {
+  font-size: 15px;
+  margin: 0 0 8px;
+}
+
+.hint p {
+  margin: 0 0 12px;
+}
+
+.hint code {
+  font-family: "SF Mono", ui-monospace, monospace;
+  font-size: 12px;
+  background: var(--line);
+  padding: 1px 4px;
+  border-radius: 4px;
+  margin: 0 2px;
+}
+
+.repos {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.repos li {
+  display: flex;
+  gap: 16px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.repos__name {
+  flex: 1;
+}
+
+.repos__branch {
+  color: var(--fg-dim);
+  font-family: "SF Mono", ui-monospace, monospace;
+  font-size: 12px;
+}
+
+/* --- the repository grid --- */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.filter {
+  font: inherit;
+  font-size: 13px;
+  font-family: "SF Mono", ui-monospace, monospace;
+  padding: 4px 8px;
+  min-width: 34ch;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+}
+
+.filter__error {
+  color: #ff453a;
+  font-size: 12px;
+}
+
+.inline-action {
+  font: inherit;
+  font-size: 11px;
+  margin-left: 8px;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.inline-action:disabled {
+  color: var(--fg-dim);
+  border-color: color-mix(in srgb, var(--line) 50%, transparent);
+  cursor: default;
+}
+
+.grid table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.grid th {
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  padding: 0;
+}
+
+.grid th button {
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-dim);
+  background: transparent;
+  border: none;
+  padding: 6px 8px;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+}
+
+.caret {
+  margin-left: 4px;
+  font-size: 8px;
+}
+
+.grid td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.grid tbody tr:hover {
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+}
+
+.grid tbody tr.is-selected {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+/* A repository we could not read must never look ordinary. */
+.grid tbody tr.is-untrusted td {
+  color: var(--fg-dim);
+  font-style: italic;
+}
+
+.col-check { width: 28px; }
+.col-name { max-width: 18ch; }
+.col-path { max-width: 30ch; color: var(--fg-dim); }
+.col-branch { max-width: 20ch; font-family: "SF Mono", ui-monospace, monospace; font-size: 12px; }
+.col-badge { width: 12ch; }
+.col-status { font-family: "SF Mono", ui-monospace, monospace; font-size: 12px; }
+.col-fetch { color: var(--fg-dim); font-size: 12px; text-align: right; }
+.col-fetch.is-problem { color: #ff9f0a; }
+
+.badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid currentColor;
+}
+
+/* Cached rows, not yet re-read this session. Dimmed rather than hidden — they
+   are useful, and the scan that confirms them is a second away — but never
+   rendered as though they had been verified. */
+tbody tr.is-stale { opacity: 0.55; }
+.stale-mark {
+  margin-left: 0.5em;
+  font-size: 0.85em;
+  color: var(--fg-dim);
+  font-style: italic;
+}
+
+.badge--conflict    { color: #ff453a; }
+.badge--in-progress { color: #ff453a; }
+.badge--diverged { color: #bf5af2; }
+.badge--behind   { color: #ffd60a; }
+.badge--ahead    { color: #64d2ff; }
+.badge--dirty    { color: #ff9f0a; }
+.badge--staged   { color: #0a84ff; }
+.badge--clean    { color: #30d158; }
+.badge--unknown  { color: var(--fg-dim); }
+
+.menu {
+  position: fixed;
+  z-index: 10;
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  min-width: 180px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.25);
+}
+
+.menu button {
+  font: inherit;
+  font-size: 13px;
+  width: 100%;
+  text-align: left;
+  padding: 4px 10px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.menu button:hover {
+  background: var(--accent);
+  color: white;
+}
+
+/* --- the action bar and the plan sheet --- */
+
+.actionbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  /* Wraps rather than clipping. At seven controls and an 800 px window the
+     buttons no longer fit on one row, and a greyed-out button whose explanation
+     has been pushed off the right edge reads as a broken one. */
+  flex-wrap: wrap;
+}
+
+.actionbar > button,
+.actionbar__split > button {
+  font: inherit;
+  font-size: 13px;
+  padding: 3px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.actionbar > button:disabled,
+.actionbar__split > button:disabled {
+  color: var(--fg-dim);
+  cursor: default;
+}
+
+.actionbar__split {
+  position: relative;
+}
+
+/* The grid's context menu is `position: fixed` at the pointer; this one hangs
+ * off its button, so it has to be positioned against the split container. */
+.actionbar__split .menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 200px;
+}
+
+.actionbar__reason {
+  color: var(--fg-dim);
+  font-size: 12px;
+  /* Never squeezed to nothing by the buttons beside it. */
+  flex: 1 0 auto;
+  white-space: nowrap;
+}
+
+.sheet {
+  min-width: 460px;
+  max-width: min(720px, 90vw);
+  padding: 20px 24px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--fg);
+  box-shadow: 0 20px 60px rgb(0 0 0 / 0.35);
+}
+
+.sheet::backdrop {
+  background: rgb(0 0 0 / 0.35);
+}
+
+.sheet__headline {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.sheet__note {
+  margin: 2px 0 0;
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+.sheet__rows {
+  margin: 16px 0;
+}
+
+/* Monospaced so the counts line up the way they do in the CLI. The sheet is
+ * meant to be recognisable as the same plan, not merely to contain it. */
+.planrow > summary {
+  display: grid;
+  /* The phrase column is fixed at the width `Plan::render` pads to, so the
+     details line up down the sheet exactly as they do in the CLI. */
+  grid-template-columns: 1em 1.5em 3ch 15ch 1fr;
+  gap: 8px;
+  align-items: baseline;
+  padding: 3px 4px;
+  border-radius: 5px;
+  font-family: "SF Mono", ui-monospace, monospace;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.planrow > summary:hover {
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+}
+
+.planrow > summary::-webkit-details-marker,
+.planrow > summary::marker {
+  display: none;
+  content: "";
+}
+
+.planrow__chevron {
+  color: var(--fg-dim);
+  transition: transform 120ms ease;
+}
+
+.planrow[open] .planrow__chevron {
+  transform: rotate(90deg);
+}
+
+.planrow__count {
+  text-align: right;
+}
+
+.planrow--skip .planrow__phrase,
+.planrow--skip .planrow__detail {
+  color: var(--fg-dim);
+}
+
+.planrow__detail {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+}
+
+.planrow__repos {
+  list-style: none;
+  margin: 2px 0 8px;
+  padding: 0 0 0 calc(1em + 1.5em + 3ch + 24px);
+  max-height: 30vh;
+  overflow-y: auto;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+.sheet__variants {
+  margin: 12px 0;
+  font-size: 12px;
+}
+
+.sheet__variants p {
+  margin: 0 0 4px;
+  color: var(--fg-dim);
+}
+
+.sheet__variants ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sheet__variants li {
+  display: flex;
+  gap: 10px;
+}
+
+.sheet__count {
+  min-width: 4ch;
+  text-align: right;
+  font-family: "SF Mono", ui-monospace, monospace;
+}
+
+.sheet__empty {
+  margin: 12px 0 0;
+  color: var(--fg-dim);
+}
+
+.sheet__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.sheet__actions button {
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 16px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.sheet__actions .primary {
+  border-color: transparent;
+  background: var(--accent);
+  color: white;
+}
+
+/* --- the job drawer --- */
+
+.drawer {
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+}
+
+.drawer--open {
+  height: 40vh;
+  min-height: 200px;
+}
+
+.drawer__bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 12px;
+  font-size: 12px;
+  user-select: none;
+}
+
+.drawer__toggle {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.drawer__chevron {
+  display: inline-block;
+  color: var(--fg-dim);
+  transition: transform 120ms ease;
+}
+
+.drawer__chevron--open {
+  transform: rotate(90deg);
+}
+
+.drawer__glance,
+.drawer__filter {
+  color: var(--fg-dim);
+}
+
+.drawer__glance {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawer__spacer {
+  flex: 1;
+}
+
+.drawer__filter {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.drawer__body {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  border-top: 1px solid var(--line);
+}
+
+.drawer__batches {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 4px 0 8px;
+}
+
+.drawer__idle {
+  padding: 12px;
+  font-size: 12px;
+}
+
+.batch__head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 12px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.batch__label {
+  font-weight: 600;
+}
+
+.batch__progress,
+.batch__elapsed,
+.batch__summary {
+  color: var(--fg-dim);
+}
+
+.batch__elapsed {
+  font-family: "SF Mono", ui-monospace, monospace;
+}
+
+.batch__rows {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+}
+
+.jobrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-right: 12px;
+}
+
+.jobrow--selected {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.jobrow__open {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 14px minmax(0, 20ch) 14ch 1fr;
+  gap: 8px;
+  align-items: baseline;
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 12px;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.jobrow__open:hover {
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+}
+
+.jobrow__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.jobrow__state,
+.jobrow__why {
+  color: var(--fg-dim);
+  font-family: "SF Mono", ui-monospace, monospace;
+}
+
+.jobrow--ok .jobrow__state {
+  color: #30d158;
+}
+
+.jobrow--failed .jobrow__state {
+  color: #ff453a;
+}
+
+.jobrow--cancelled .jobrow__state,
+.jobrow--queued .jobrow__state {
+  color: var(--fg-dim);
+}
+
+/* The spinner column is always there, so a row does not shift left when it
+ * stops running. */
+.jobrow__spinner {
+  width: 10px;
+  height: 10px;
+  align-self: center;
+}
+
+.jobrow--running .jobrow__spinner {
+  border: 1.5px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 700ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jobrow--running .jobrow__spinner {
+    animation: none;
+    border-top-color: var(--line);
+    background: var(--accent);
+  }
+}
+
+.transcript {
+  flex: 0 0 52%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--line);
+}
+
+.transcript__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+.transcript__empty {
+  padding: 12px;
+  font-size: 12px;
+}
+
+.transcript__lines {
+  list-style: none;
+  margin: 0;
+  padding: 6px 0;
+  overflow: auto;
+  flex: 1;
+  font-family: "SF Mono", ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.transcript__line {
+  display: flex;
+  gap: 10px;
+  padding: 0 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.transcript__at {
+  flex: none;
+  color: var(--fg-dim);
+  user-select: none;
+}
+
+.transcript__line--stderr .transcript__text {
+  color: #ff9f0a;
+}
+
+/* Notices are git-scylla's own words in a transcript of git's — the distinction
+ * matters when reading what actually happened. */
+.transcript__line--notice .transcript__text {
+  color: var(--fg-dim);
+  font-style: italic;
+}
+
+/* --- keyboard and scan progress --- */
+
+/* The grid takes focus so arrow keys mean "move down a row" here and nothing
+ * anywhere else. Its own outline is suppressed; the cursor row carries it. */
+.grid:focus {
+  outline: none;
+}
+
+.grid tr.is-cursor td:first-child {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.grid:focus tr.is-cursor {
+  outline: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: -1px;
+}
+
+.titlebar__status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.scan {
+  appearance: none;
+  width: 90px;
+  height: 4px;
+  border: none;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.scan::-webkit-progress-bar {
+  background: var(--line);
+  border-radius: 2px;
+}
+
+.scan::-webkit-progress-value {
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 120ms linear;
+}
+
+/* ---- authoring surfaces ---------------------------------------------- */
+
+/* A form inside a menu needs room the menu does not give a list. */
+.menu--wide {
+  min-width: 22rem;
+  padding: 0.75rem;
+}
+
+.compose__title {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+}
+.compose__field,
+.compose__check {
+  display: block;
+  margin-bottom: 0.6rem;
+  font-size: 0.85rem;
+}
+.compose__field > span {
+  display: block;
+  margin-bottom: 0.2rem;
+  color: var(--fg-dim);
+}
+.compose__field input {
+  width: 100%;
+}
+.compose__field small,
+.compose__check small,
+.settings__editor small {
+  display: block;
+  color: var(--fg-dim);
+  font-size: 0.8em;
+}
+.compose__check {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.4rem;
+  align-items: start;
+}
+.compose__actions,
+.settings__actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+  margin-top: 0.75rem;
+}
+
+/* Danger is reserved for the genuinely irreversible — a force-with-lease push
+   and a custom command. Everything else stays neutral, so the distinction
+   keeps its meaning: styling that shows up on ordinary work is wallpaper
+   within a week, and then it is not there on the day it matters. */
+.menu__danger {
+  color: #ff453a;
+}
+.sheet--danger {
+  border: 1px solid #ff453a;
+}
+.sheet__guard {
+  margin: 0.75rem 0 0;
+  padding: 0.6rem 0.75rem;
+  border-radius: 6px;
+  background: rgba(255, 69, 58, 0.12);
+  font-size: 0.9rem;
+}
+.sheet__guardinput {
+  margin-top: 0.4rem;
+  width: 6rem;
+}
+button.primary.danger {
+  background: #ff453a;
+  border-color: #ff453a;
+}
+button.primary:disabled {
+  opacity: 0.4;
+}
+
+/* Not danger styling: a fact about the working set the user should read before
+   confirming, which is a different thing from an irreversible action. */
+.sheet__warning {
+  margin: 0.75rem 0 0;
+  padding: 0.5rem 0.75rem;
+  border-left: 3px solid #ff9f0a;
+  font-size: 0.9rem;
+}
+
+.settings {
+  position: fixed;
+  inset: 10% 20%;
+  overflow: auto;
+  padding: 1rem 1.25rem;
+  border-radius: 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.4);
+  z-index: 40;
+}
+.settings__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.settings section {
+  margin-top: 1.25rem;
+}
+.settings h3 {
+  margin: 0 0 0.25rem;
+  font-size: 0.95rem;
+}
+.settings input[type="text"],
+.settings input:not([type]) {
+  width: 100%;
+}
+.settings__customs {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 0.75rem;
+}
+.settings__customs li {
+  display: grid;
+  grid-template-columns: 10rem 1fr auto auto auto;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.3rem 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.85rem;
+}
+.settings__name {
+  font-weight: 600;
+}
+.settings__flags {
+  color: var(--fg-dim);
+  font-size: 0.8em;
+}
+.settings__editor {
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.settings__editor label {
+  display: block;
+  margin-bottom: 0.6rem;
+  font-size: 0.85rem;
+}
+.settings__editor label > span {
+  display: block;
+  margin-bottom: 0.2rem;
+  color: var(--fg-dim);
+}
+.settings__check {
+  display: grid !important;
+  grid-template-columns: auto 1fr;
+  gap: 0.4rem;
+  align-items: start;
+}

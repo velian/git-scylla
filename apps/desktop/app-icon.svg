@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!--
+    git-scylla.
+
+    Many heads on one body: the monster the tool is named for, and what the tool
+    does — one gesture reaching a lot of repositories at once.
+
+    Three heads rather than six, straight necks rather than curved, and heavy
+    strokes throughout, all for the same reason: this has to survive being 16 px
+    tall in a Dock. An earlier version curved the necks together and they merged
+    into an unreadable blob at that size.
+  -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2C3648"/>
+      <stop offset="1" stop-color="#121722"/>
+    </linearGradient>
+    <!--
+      `userSpaceOnUse`, not the default. A horizontal line has a zero-height
+      bounding box, so an object-bounding-box gradient is degenerate and the
+      spec says not to render it — which is exactly what happened: the necks
+      disappeared and left three dots floating beside a bar.
+    -->
+    <linearGradient id="head" gradientUnits="userSpaceOnUse"
+                    x1="330" y1="300" x2="750" y2="724">
+      <stop offset="0" stop-color="#5CB0FF"/>
+      <stop offset="1" stop-color="#0A6ED1"/>
+    </linearGradient>
+  </defs>
+
+  <!-- The macOS tile: 824 of 1024, centred, with the Big Sur corner radius. -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)"/>
+
+  <!-- The body, heavier than the necks so it reads as the thing they hang off. -->
+  <path d="M330 318 V706" stroke="#EAEFF8" stroke-width="104" stroke-linecap="round" fill="none"/>
+
+  <!-- Three necks, far enough apart to stay three at 16 px. -->
+  <g stroke="url(#head)" stroke-width="72" stroke-linecap="round" fill="none">
+    <path d="M330 348 H628"/>
+    <path d="M330 512 H628"/>
+    <path d="M330 676 H628"/>
+  </g>
+
+  <g fill="url(#head)">
+    <circle cx="666" cy="348" r="82"/>
+    <circle cx="666" cy="512" r="82"/>
+    <circle cx="666" cy="676" r="82"/>
+  </g>
+</svg>

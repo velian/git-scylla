@@ -1,0 +1,7 @@
+edition = "2021"
+max_width = 100
+# Keep short struct literals, calls and matches on one line. At 100 columns the
+# compact form reads better than rustfmt's default, which explodes a two-field
+# literal across four lines.
+use_small_heuristics = "Max"
+use_field_init_shorthand = true

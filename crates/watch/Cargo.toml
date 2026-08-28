@@ -1,0 +1,21 @@
+[package]
+name = "git-scylla-watch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+git-scylla-core = { workspace = true }
+notify = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "time"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
+
+[lints]
+workspace = true
