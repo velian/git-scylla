@@ -11,6 +11,7 @@
 
 use crate::plan::{plan, Plan};
 use crate::policy::{after_attempt, due, manual_attempt, Attempt, FetchPolicy, Policy};
+use crate::probe_traffic::{ProbeTraffic, Why};
 use crate::runner::run_job;
 use crate::sched::{Limits, Permits, Scheduler, Ticket};
 use crate::Selection;
@@ -36,22 +37,11 @@ const CACHE_DEBOUNCE: Duration = Duration::from_secs(2);
 
 /// The least time between two probes of one repository, for requests that came
 /// from watching rather than from knowing.
+///
+/// Handed to [`ProbeTraffic`] rather than read here: the rule that uses it
+/// lives there, and a constant read from two modules is one that can be changed
+/// in one of them.
 const PROBE_INTERVAL: Duration = Duration::from_secs(1);
-
-/// Where a probe request came from, which decides whether the rate limit
-/// applies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Why {
-    /// The engine knows something changed: a job finished, a repository was
-    /// discovered, the user pressed Refresh. Never rate-limited — there is
-    /// exactly one of each, and delaying the row that shows a job's result is
-    /// the one thing the limit must not do.
-    Definite,
-    /// A watcher saw filesystem activity. Rate-limited: a directory being
-    /// written to continuously produces a fresh debounce window every 300 ms
-    /// forever, and each one would otherwise be a `git status`.
-    Observed,
-}
 
 /// Sent as a plain number, not ts-rs's default `bigint` for `u64`: Tauri's IPC
 /// is JSON, `serde_json` writes a number, and JavaScript reads one. A generated
@@ -590,31 +580,15 @@ struct Actor {
     /// Permits are held here rather than inside the job task, so the actor
     /// releases capacity at a point it controls.
     held: HashMap<JobId, Permits>,
-    /// Repositories with a probe in flight, so two never race.
-    probing: HashSet<RepoId>,
-    /// Repositories owed exactly one re-probe once they stop being busy.
+    /// Who is owed a probe, who has one in flight, and when each last started.
     ///
-    /// A set and not a queue: that is what makes "exactly one" true no matter
-    /// how many times something asked. Without it, the watcher turns every pull
-    /// into a probe storm.
-    reprobe: HashSet<RepoId>,
-    /// The same, for requests that came from *watching* rather than from
-    /// knowing.
-    ///
-    /// Kept apart because only these are rate-limited. A job finishing is a
-    /// definite change and there is exactly one of it; a directory being
-    /// written to produces a fresh 300 ms window forever, and each one would
-    /// otherwise be a `git status`.
-    observed: HashSet<RepoId>,
+    /// Its own module because the rules are subtle, each of them was a bug
+    /// first, and none of them needs anything the actor owns — see
+    /// [`crate::probe_traffic`].
+    traffic: ProbeTraffic,
 
     /// Is a watcher covering the roots?
     watched: bool,
-    /// When each repository was last probed, for the re-probe rate limit.
-    ///
-    /// `Instant` rather than the snapshot's `probed_at`: this is about how often
-    /// work is *started*, which a wall clock that can move is the wrong tool
-    /// for, and a probe that is still running has no `probed_at` yet.
-    last_probe: HashMap<RepoId, Instant>,
 
     /// Has any scan settled yet?
     ///
@@ -668,11 +642,8 @@ impl Actor {
             scans: HashMap::new(),
             sched,
             held: HashMap::new(),
-            probing: HashSet::new(),
-            reprobe: HashSet::new(),
-            observed: HashSet::new(),
+            traffic: ProbeTraffic::new(PROBE_INTERVAL),
             watched: false,
-            last_probe: HashMap::new(),
             scan_settled: false,
             background_done: VecDeque::new(),
             from_cache: HashSet::new(),
@@ -735,11 +706,7 @@ impl Actor {
 
     /// Nothing running, nothing queued, no probe outstanding.
     fn is_quiet(&self) -> bool {
-        self.sched.is_idle()
-            && self.probing.is_empty()
-            && self.reprobe.is_empty()
-            && self.observed.is_empty()
-            && self.scans.is_empty()
+        self.sched.is_idle() && self.traffic.is_idle() && self.scans.is_empty()
     }
 
     fn emit(&self, event: Event) {
@@ -1410,7 +1377,7 @@ impl Actor {
                     // hold: the watcher's index is rebuilt on scan completion
                     // and can briefly name one this actor has already dropped.
                     if self.found.contains_key(&id) {
-                        self.ask_probe(&id, Why::Observed);
+                        self.traffic.note(&id, Why::Observed);
                     }
                 }
             }
@@ -1447,8 +1414,7 @@ impl Actor {
                 if !busy {
                     self.snapshots.remove(id);
                     self.found.remove(id);
-                    self.reprobe.remove(id);
-                    self.observed.remove(id);
+                    self.traffic.forget(id);
                 }
                 !busy
             })
@@ -1570,72 +1536,54 @@ impl Actor {
             });
         }
 
-        // Re-probes owed to repositories that are no longer busy. Definite ones
-        // first and without a rate limit: a job finished, and delaying the row
-        // that shows its result is the one thing this must not do.
-        let free = |a: &Actor, r: &RepoId| !a.sched.is_busy(r) && !a.probing.contains(r);
-        let ready: Vec<RepoId> = self.reprobe.iter().filter(|r| free(self, r)).cloned().collect();
-        for repo in ready {
-            self.spawn_probe(&repo);
-        }
-
-        // Then what a watcher merely *saw*, at most once a second per
-        // repository. Deferred rather than dropped: the loop wakes on its other
-        // timers, and the repository is re-probed on a later pass.
-        let now = Instant::now();
-        let observed: Vec<RepoId> = self
-            .observed
-            .iter()
-            .filter(|r| free(self, r))
-            .filter(|r| self.last_probe.get(*r).is_none_or(|at| now >= *at + PROBE_INTERVAL))
-            .cloned()
-            .collect();
-        for repo in observed {
+        // Everything owed a probe that may start now. One call: what is owed,
+        // in what order, and how long a watcher's report has to wait are all
+        // decided in `probe_traffic`, and none of it needs anything here.
+        //
+        // `can_start` answers for every reason this loop could fail to act, not
+        // only for a job holding the repository — a repository handed back has
+        // been marked as probing, so one that cannot be spawned would stay
+        // marked and the engine would never be idle again.
+        let can_start = |r: &RepoId| !self.sched.is_busy(r) && self.found.contains_key(r);
+        for repo in self.traffic.take_ready(Instant::now(), can_start) {
             self.spawn_probe(&repo);
         }
     }
 
-    /// Ask for a probe, honouring the busy marker.
+    /// Ask for a probe because something is known to have changed.
     ///
-    /// While a job is in flight the request is remembered rather than run, and
-    /// collapses with any other request for the same repository — so a pull that
-    /// writes a thousand files still costs exactly one re-probe.
+    /// Remembered rather than run: it is started by the next `pump`, which the
+    /// run loop reaches before it waits again. Collapses with any other request
+    /// for the same repository, so a pull that writes a thousand files still
+    /// costs exactly one re-probe.
     fn request_probe(&mut self, repo: &RepoId) {
-        self.ask_probe(repo, Why::Definite);
-    }
-
-    /// Ask for a probe, honouring the busy marker and — for what a watcher
-    /// merely saw — the rate limit.
-    fn ask_probe(&mut self, repo: &RepoId, why: Why) {
-        let busy = self.sched.is_busy(repo) || self.probing.contains(repo);
-        let too_soon = why == Why::Observed
-            && self.last_probe.get(repo).is_some_and(|at| Instant::now() < *at + PROBE_INTERVAL);
-        if busy || too_soon {
-            match why {
-                Why::Definite => self.reprobe.insert(repo.clone()),
-                Why::Observed => self.observed.insert(repo.clone()),
-            };
+        // Nothing is owed to a repository this actor does not hold, and noting
+        // one would keep the engine from ever being idle: what is owed is never
+        // dropped, only deferred. `Cmd::RefreshRepo` carries whatever id a
+        // surface sends, which need not name anything that was discovered.
+        //
+        // The watcher's path guards the same way, for its own reason — see
+        // `on_invalidation`.
+        if !self.found.contains_key(repo) {
             return;
         }
-        self.spawn_probe(repo);
+        self.traffic.note(repo, Why::Definite);
     }
 
+    /// Start a probe that [`ProbeTraffic::take_ready`] has already admitted.
+    ///
+    /// The bookkeeping is done: the repository is marked as probing and the
+    /// requests owed to it are cleared. This only has to spawn.
     fn spawn_probe(&mut self, repo: &RepoId) {
-        let Some(found) = self.found.get(repo).cloned() else { return };
-        // Any request owed to this repository is satisfied by the probe about
-        // to run, which will read the state as it is now. Without this the owed
-        // entry survives and fires a second, redundant probe the moment this
-        // one finishes. Invisible until a watcher existed, because nothing else
-        // fills `reprobe` while a job is also completing.
-        //
-        // A request arriving *during* the probe is a different matter and does
-        // re-arm: `request_probe` sees `probing` and defers it.
-        // Both sets: a probe starting now satisfies every request owed to this
-        // repository, however it was asked for.
-        self.reprobe.remove(repo);
-        self.observed.remove(repo);
-        self.probing.insert(repo.clone());
-        self.last_probe.insert(repo.clone(), Instant::now());
+        let Some(found) = self.found.get(repo).cloned() else {
+            // Unreachable — `can_start` checked exactly this, and nothing runs
+            // between it and here. Handed back rather than dropped anyway: the
+            // probing marker is set, and failing to release it would leave the
+            // engine permanently un-idle, the same way `pump` hands a ticket
+            // back to the scheduler above.
+            self.traffic.finished(repo);
+            return;
+        };
         let (probe, internal, slots) =
             (Arc::clone(&self.probe), self.internal.clone(), Arc::clone(&self.probe_slots));
         let timeout = self.config.probe_timeout;
@@ -1684,7 +1632,7 @@ impl Actor {
             }
 
             Internal::Probed(snap) => {
-                self.probing.remove(&snap.id);
+                self.traffic.finished(&snap.id);
                 let mut snap = *snap;
                 // Clears this repository from whichever scans were waiting on
                 // it, and only those.

@@ -352,11 +352,19 @@ async fn a_busy_directory_cannot_spin_the_probe_pool() {
     settle(&h).await;
     engine.shutdown().await;
 
-    // One for the scan, then at most one per second of activity. The bound is
-    // generous — what it rules out is the hundred that arrived.
+    // **What this test is for is the plumbing**, not the arithmetic: that a
+    // hundred real watcher reports reach the engine, and that the rate limit is
+    // wired to them at all.
+    //
+    // The limit itself is stated exactly, without a clock, in
+    // `probe_traffic::tests::an_observed_request_waits_for_the_interval_and_is_
+    // not_dropped`. Asserting a number here could only ever be approximate —
+    // the count depends on how the sleeps landed — so the bound left is the
+    // loose one that catches the two real failures: nothing got through, or
+    // everything did.
     let n = per_repo.lock().unwrap()[&id];
-    assert!(n <= 5, "{n} probes for two seconds of filesystem noise");
-    assert!(n >= 2, "the noise was ignored entirely, which is the other failure");
+    assert!(n >= 2, "the noise was ignored entirely");
+    assert!(n <= 5, "{n} probes for two seconds of noise — the limit is not wired up");
 }
 
 #[tokio::test(flavor = "multi_thread")]
