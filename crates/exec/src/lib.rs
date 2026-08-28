@@ -1,21 +1,7 @@
-//! Subprocess discipline.
+//! Runs `git` as a subprocess. A spawned child cannot prompt, cannot outlive
+//! its deadline, and cannot deadlock the caller on its own output.
 //!
-//! Everything in this crate exists to make a spawned `git` incapable of
-//! blocking, prompting, or escaping. It is the foundation the whole action
-//! engine stands on, because the failure it prevents — one repository's `git`
-//! sitting forever on an invisible credential prompt — does not present as an
-//! error. It presents as a batch that never finishes.
-//!
-//! Three guarantees, each with a test:
-//!
-//! 1. **It cannot prompt.** A hardened environment plus `/dev/null` on stdin
-//!    ([`env::HARDENED_ENV`]). A remote demanding credentials fails in under a
-//!    second with `terminal prompts disabled`.
-//! 2. **It cannot outlive its deadline.** Every child gets its own process
-//!    group, and a timeout or cancellation kills the *group* — `git` spawns
-//!    `ssh`, and signalling only the direct child orphans a live connection.
-//! 3. **It cannot deadlock on its own output.** Both pipes are drained
-//!    concurrently with the wait, never after it.
+//! See `docs/README.md` for the design and diagrams.
 
 mod env;
 mod kill;
@@ -37,17 +23,11 @@ use tokio_util::sync::CancellationToken;
 const GRACE: Duration = Duration::from_secs(2);
 
 /// How long to wait for the pipes to close after the group is dead.
-///
-/// Defensive: with the group killed there is nothing left to hold the write
-/// end, so this should never elapse. If it does, the transcript is truncated
-/// and says so rather than the job hanging.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExecError {
-    /// `git` could not be started at all — not on `PATH`, or the repository
-    /// directory is gone. Distinct from `git` running and failing, because the
-    /// remedies are completely different.
+    /// `git` could not be started — not on `PATH`, or the directory is gone.
     #[error("could not run git in {dir}: {source}")]
     Spawn { dir: PathBuf, source: std::io::Error },
     #[error("could not determine the child's process group")]
@@ -55,18 +35,11 @@ pub enum ExecError {
 }
 
 /// Why the child stopped.
-///
-/// An enum rather than a `timed_out: bool`: a cancelled job and one that ran out
-/// of time need different words in the UI and different states in
-/// [`git_scylla_core`], and two booleans that cannot both be true is a worse way
-/// to say it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stop {
-    /// The child exited on its own, successfully or not.
+    /// Exited on its own, successfully or not.
     Exited,
-    /// The deadline passed and the group was killed.
     TimedOut,
-    /// The cancellation token fired and the group was killed.
     Cancelled,
 }
 
@@ -97,13 +70,7 @@ impl Outcome {
     }
 }
 
-/// The result of running one command for its output rather than its transcript.
-///
-/// Separate from [`Outcome`] because the two callers want incompatible things.
-/// A job wants an interleaved, timestamped, lossy-UTF-8 transcript. The probe
-/// wants stdout as **raw bytes** — `git status -z` emits paths that need not be
-/// UTF-8, and decoding them to build a transcript would corrupt the thing being
-/// parsed. One spawn path, two output policies.
+/// The result of running one command for its raw output rather than a transcript.
 #[derive(Debug, Clone)]
 pub struct Captured {
     pub code: Option<i32>,
@@ -169,24 +136,14 @@ impl GitCommand {
         self
     }
 
-    /// Set an extra environment variable.
-    ///
-    /// **Cannot override the hardening.** [`HARDENED_ENV`] is applied last, so a
-    /// caller that passes `GIT_TERMINAL_PROMPT=1` — whether by mistake or by
-    /// clever reasoning about one special repository — gets `0` anyway. The
-    /// guarantee is only worth having if it is unconditional.
+    /// Set an extra environment variable. Cannot override [`HARDENED_ENV`],
+    /// which is applied last.
     pub fn env(mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
         self.extra_env.push((key.as_ref().to_os_string(), value.as_ref().to_os_string()));
         self
     }
 
-    /// Set several environment variables at once.
-    ///
-    /// Same guarantee as [`Self::env`]: [`HARDENED_ENV`] is applied last and
-    /// wins. This exists because every caller that threads a configured
-    /// environment through — the job runner's three spawn sites and the
-    /// probe's status command — had otherwise written the same loop, and four
-    /// copies of "apply the environment" is four places to forget one.
+    /// Set several environment variables at once. Same guarantee as [`Self::env`].
     pub fn envs<'a, K, V>(mut self, vars: impl IntoIterator<Item = &'a (K, V)>) -> Self
     where
         K: AsRef<OsStr> + 'a,
@@ -224,9 +181,8 @@ impl GitCommand {
         let cancel = self.cancel.clone();
         let (mut child, pgid) = self.spawn()?;
 
-        // Take the pipes before waiting on anything. A chatty child fills the
-        // pipe buffer and blocks in `write`; if we were inside `wait()` at that
-        // point, neither side would ever move again.
+        // Pipes are taken and drained before `wait_or_kill` is called, so a
+        // full pipe buffer can never block the child inside `wait()`.
         let stdout = child.stdout.take().expect("piped");
         let stderr = child.stderr.take().expect("piped");
         let (tx, mut rx) = tokio::sync::mpsc::channel::<LogLine>(1024);
@@ -243,9 +199,6 @@ impl GitCommand {
 
         let (stop, code) = wait_or_kill(&mut child, pgid, deadline, cancel.as_ref()).await;
 
-        // The group is dead, so the write ends are closed and this returns. The
-        // timeout is belt and braces, and it degrades the transcript rather than
-        // the job.
         let mut transcript = match tokio::time::timeout(DRAIN_TIMEOUT, drain).await {
             Ok(Ok(t)) => t,
             Ok(Err(e)) => {
@@ -265,10 +218,6 @@ impl GitCommand {
     }
 
     /// Run, capturing raw stdout bytes and stderr as text.
-    ///
-    /// Same spawn, same environment, same process group, same deadline as
-    /// [`Self::run`] — only the output policy differs. For the probe, whose
-    /// stdout is NUL-separated data and not something to read.
     pub async fn capture(self, deadline: Instant) -> Result<Captured, ExecError> {
         let started = Instant::now();
         let cancel = self.cancel.clone();
@@ -311,22 +260,15 @@ impl GitCommand {
         let mut cmd = Command::new("git");
         cmd.args(&self.args)
             .current_dir(&self.dir)
-            // Nothing may read from a terminal. This is the guarantee the
-            // environment hardening only *implies*: with no stdin, `ssh` cannot
-            // prompt for a passphrase or a host-key confirmation even if some
-            // future git forgets to honour GIT_TERMINAL_PROMPT.
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // Its own process group, so a deadline can kill the whole tree.
-            // `setpgid(0, 0)` makes the pgid equal the pid.
+            // setpgid(0, 0): pgid becomes the child's own pid.
             .process_group(0)
-            // If a caller drops the future, do not leave the child running.
             .kill_on_drop(true);
         for (k, v) in &self.extra_env {
             cmd.env(k, v);
         }
-        // Last, and therefore unconditional.
         env::harden(&mut cmd);
 
         let child =
@@ -346,14 +288,11 @@ async fn wait_or_kill(
     let cancelled = async {
         match cancel {
             Some(t) => t.cancelled().await,
-            // Never resolves, so `select!` reduces to the other two arms.
             None => std::future::pending().await,
         }
     };
 
     let stop = tokio::select! {
-        // `Child::wait` is cancel-safe, so losing this race and calling it again
-        // below is sound.
         status = child.wait() => {
             return (Stop::Exited, status.ok().and_then(|s| s.code()));
         }
@@ -362,7 +301,6 @@ async fn wait_or_kill(
     };
 
     kill::terminate_group(pgid, child).await;
-    // Reap, so the process does not linger as a zombie.
     let code = child.wait().await.ok().and_then(|s| s.code());
     (stop, code)
 }

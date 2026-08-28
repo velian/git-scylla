@@ -3,22 +3,13 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::sync::mpsc::Sender;
 
 /// Longest run of bytes accepted without a terminator before it is emitted
-/// anyway. A child that writes 100 MB with no newline must not become 100 MB of
-/// one `String`.
+/// anyway.
 const MAX_LINE: usize = 64 * 1024;
 
-/// Read one stream, emitting a [`LogLine`] per line.
-///
-/// Byte-oriented, and lines are split on **either `\n` or `\r`**. The `\r` is
-/// not pedantry: `git fetch` and `git push` write progress with carriage
-/// returns, so a `\n`-only splitter buffers an entire multi-minute transfer into
-/// a single enormous line and the transcript shows nothing until it finishes.
-///
-/// Empty lines are dropped, which also makes `\r\n` produce one line rather than
-/// two. A blank line carries nothing a transcript needs.
-///
-/// Text is decoded lossily, per line, at the last moment: git puts filenames in
-/// its error messages and those need not be UTF-8.
+/// Read one stream, emitting a [`LogLine`] per line. Splits on `\n` or `\r`,
+/// so `git fetch`/`git push` progress (carriage-return updates) is not
+/// buffered into one line. Empty lines are dropped. Text is decoded lossily,
+/// per line.
 pub async fn pump<R>(reader: R, stream: Stream, tx: Sender<LogLine>)
 where
     R: AsyncRead + Unpin,
@@ -57,13 +48,10 @@ where
             break;
         }
         if (terminated || line.len() >= MAX_LINE) && !emit(&mut line, stream, &tx).await {
-            // The receiver is gone: the job finished and nothing is listening.
             return;
         }
     }
 
-    // A final line with no terminator is still a line — and for `git`, often the
-    // most important one.
     let _ = emit(&mut line, stream, &tx).await;
 }
 
@@ -99,14 +87,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_trailing_line_without_a_terminator_is_kept() {
-        // For git this is often the `fatal:` that explains everything.
         assert_eq!(split(b"one\nfatal: no").await, ["one", "fatal: no"]);
     }
 
     #[tokio::test]
     async fn splits_progress_output_on_carriage_returns() {
-        // What `git fetch` actually writes. A \n-only splitter would return one
-        // line, and only after the transfer finished.
         assert_eq!(
             split(b"Receiving objects:  1%\rReceiving objects: 50%\rReceiving objects: 100%\r")
                 .await,
@@ -128,8 +113,6 @@ mod tests {
 
     #[tokio::test]
     async fn non_utf8_bytes_become_a_readable_line() {
-        // A filename in a git error message need not be UTF-8. It must not
-        // become a failed job.
         let out = split(b"fatal: cannot stat 'bad\xff\xfename'\n").await;
         assert_eq!(out.len(), 1);
         assert!(out[0].starts_with("fatal: cannot stat 'bad"));

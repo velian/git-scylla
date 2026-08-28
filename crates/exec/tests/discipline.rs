@@ -24,13 +24,8 @@ fn repo(dir: &Path) -> PathBuf {
     repo
 }
 
-/// Run a shell command *as git's child*, via an alias.
-///
-/// Deliberately not an API hole in `GitCommand`: the discipline under test is
-/// the discipline applied to `git`, so the test drives `git` and lets git spawn
-/// the awkward process. A `!`-prefixed alias is git's own documented mechanism
-/// for that, and it puts the shell in the same process group — which is exactly
-/// the shape of the real problem (`git fetch` spawning `ssh`).
+/// Run a shell command as `git`'s child, via a `!`-prefixed alias — git's own
+/// mechanism for it, and it puts the shell in the same process group.
 fn via_alias(repo: &Path, script: &str) -> GitCommand {
     GitCommand::new(repo).args(["-c", &format!("alias.x=!{script}"), "x"])
 }
@@ -54,13 +49,10 @@ async fn a_successful_command_reports_its_output_in_order() {
     assert!(texts.contains(&"two"), "{texts:?}");
     assert!(texts.contains(&"three"), "{texts:?}");
 
-    // Both streams land in one log, each tagged with its origin.
     assert_eq!(out.log.iter().find(|l| l.text == "two").unwrap().stream, Stream::Stderr);
     assert_eq!(out.log.iter().find(|l| l.text == "one").unwrap().stream, Stream::Stdout);
     assert_eq!(out.last_stderr(), Some("two"));
 
-    // Timestamps are non-decreasing, so reading the transcript top to bottom is
-    // reading it in time order.
     let stamps: Vec<_> = out.log.iter().map(|l| l.at).collect();
     assert!(stamps.windows(2).all(|w| w[0] <= w[1]), "transcript is out of order");
 }
@@ -83,10 +75,6 @@ async fn a_failing_command_reports_its_code_and_its_error() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn git_not_being_runnable_is_distinct_from_git_failing() {
-    // A directory that does not exist cannot be a working directory, so the
-    // spawn itself fails. The caller must be able to tell that from `git`
-    // running and exiting non-zero: one means "install git" or "the repository
-    // vanished", the other means "git said no".
     let err = GitCommand::new("/nonexistent/directory/anywhere")
         .args(["status"])
         .run(Instant::now() + Duration::from_secs(5))
@@ -96,9 +84,7 @@ async fn git_not_being_runnable_is_distinct_from_git_failing() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_chatty_child_does_not_deadlock() {
-    // ~250 KB down one pipe, far past the ~64 KB kernel pipe buffer. If the
-    // implementation waited on the child before draining, the child would block
-    // in `write`, we would block in `wait`, and neither would ever move.
+    // ~250 KB down one pipe, past the ~64 KB kernel pipe buffer.
     let tmp = tempfile::tempdir().unwrap();
     let repo = repo(tmp.path());
 
@@ -129,7 +115,6 @@ async fn a_chatty_child_is_elided_rather_than_retained_whole() {
 
     assert_eq!(out.code, Some(0));
     assert!(out.log.len() < 20000);
-    // Both ends survive, and the middle says what it dropped.
     assert_eq!(out.log[0].text, "line 0");
     assert_eq!(out.log.last().unwrap().text, "line 19999");
     let notices: Vec<_> = out.log.iter().filter(|l| l.stream == Stream::Notice).collect();
@@ -137,20 +122,13 @@ async fn a_chatty_child_is_elided_rather_than_retained_whole() {
     assert!(notices[0].text.contains("elided"), "{}", notices[0].text);
 }
 
-/// Write a shell script that **ignores `SIGTERM`**, stays busy for ~5 s, and
-/// then announces that it survived by creating the file given as `$1`.
+/// Write a shell script that ignores `SIGTERM`, stays busy for ~5 s, and then
+/// announces it survived by creating the file given as `$1`.
 ///
-/// A script on disk rather than an inline `sh -c`: the grandchild case needs a
-/// script that spawns a script, and expressing that through a git alias inline
-/// means four levels of nested quoting, which is how a test ends up silently
-/// running something other than what it says.
-///
-/// The delay is `sleep 1` five times rather than one `sleep 5` on purpose. A
-/// group `SIGTERM` kills the `sleep`, and a trapping shell would then fall
-/// straight through to the next command — so a single sleep would let the marker
-/// appear within milliseconds of the signal and the test would assert a race
-/// rather than a kill. Looping means killing one `sleep` only advances the shell
-/// by a second.
+/// `sleep 1` five times rather than one `sleep 5`: a group `SIGTERM` kills the
+/// `sleep`, and a trapping shell falls through to the next command
+/// immediately — one sleep would let the marker appear within milliseconds of
+/// the signal, asserting a race rather than a kill.
 fn write_stubborn(dir: &Path) -> PathBuf {
     let path = dir.join("stubborn.sh");
     std::fs::write(
@@ -162,11 +140,8 @@ fn write_stubborn(dir: &Path) -> PathBuf {
     path
 }
 
-/// A script that backgrounds another script and then waits for it.
-///
-/// This makes the *direct* child an ordinary `SIGTERM` casualty while a
-/// grandchild ignores the signal. The `wait` keeps it — and therefore `git` —
-/// alive until the deadline, so the job times out rather than exiting.
+/// A script that backgrounds another script and then waits for it, so the
+/// direct child dies to `SIGTERM` while a grandchild ignores it.
 fn write_parent(dir: &Path) -> PathBuf {
     let path = dir.join("parent.sh");
     std::fs::write(&path, "#!/bin/sh\n\"$1\" \"$2\" &\nwait\n").unwrap();
@@ -181,9 +156,7 @@ fn make_executable(path: &Path) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_command_that_ignores_sigterm_is_still_reaped() {
-    // `git` runs the alias in a child process, so the tree is
-    // git -> stubborn.sh -> sleep, all in one process group. The script ignores
-    // SIGTERM; only SIGKILL ends it.
+    // git -> stubborn.sh -> sleep, all in one process group. Only SIGKILL ends it.
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().canonicalize().unwrap();
     let repo = repo(&dir);
@@ -198,24 +171,14 @@ async fn a_command_that_ignores_sigterm_is_still_reaped() {
     let elapsed = started.elapsed();
 
     assert_eq!(out.stop, Stop::TimedOut);
-    // Bounded by the deadline plus at most the 2 s grace, never by the child.
     assert!(elapsed < Duration::from_secs(3), "took {elapsed:?} to give up");
 
-    // Wait past when the script would have finished. The marker is how a
-    // survivor announces itself.
     tokio::time::sleep(Duration::from_secs(6)).await;
     assert!(!survived.exists(), "the SIGTERM-ignoring child outlived the job: it was not reaped");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_grandchild_that_outlives_its_parent_is_still_reaped() {
-    // The real shape of the problem: `git fetch` spawns `ssh`, and signalling
-    // only the direct child orphans a live connection.
-    //
-    // The direct child dies on SIGTERM immediately while a grandchild ignores
-    // it. Nothing about the direct child's fate says anything about the group's,
-    // which is why the kill targets `-pgid` and why SIGKILL is unconditional
-    // rather than skipped once the child is gone.
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().canonicalize().unwrap();
     let repo = repo(&dir);
@@ -251,10 +214,7 @@ async fn a_timeout_says_so_in_the_transcript() {
 
     assert_eq!(out.stop, Stop::TimedOut);
     assert!(out.timed_out());
-    // Output produced before the deadline is kept: a transcript that discards
-    // everything on timeout answers no questions.
     assert!(out.log.iter().any(|l| l.text == "working"), "{:?}", out.log);
-    // And the transcript explains itself rather than just ending.
     let notice = out.log.iter().find(|l| l.stream == Stream::Notice).expect("a notice");
     assert!(notice.text.contains("timed out"), "{}", notice.text);
     assert!(notice.text.contains("killed the process group"), "{}", notice.text);
@@ -314,8 +274,6 @@ async fn an_already_cancelled_token_stops_the_command_immediately() {
 
 /// A listener that answers every request with `401 Unauthorized` and a
 /// `WWW-Authenticate` header, which is what makes `git` reach for credentials.
-///
-/// Local and offline: the whole suite must run with no network.
 fn spawn_401_server() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().unwrap().port();
@@ -337,17 +295,10 @@ fn spawn_401_server() -> u16 {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_remote_demanding_credentials_fails_fast_instead_of_hanging() {
-    // The single most valuable test in the crate.
-    //
-    // Without the hardening, a `git fetch` against a remote that asks for
-    // credentials waits on a terminal read. Not slowly — forever, and silently,
-    // and one such repository is enough to make a batch of forty never finish.
-    // Because it never errors, nothing else in the system can detect it.
-    //
-    // Asserting the *message* and not just the timing is the point: `terminal
-    // prompts disabled` is proof that GIT_TERMINAL_PROMPT reached the child and
-    // took effect, rather than the connection merely having failed for some
-    // other reason.
+    // Without the hardening, this waits on a terminal read forever. Asserting
+    // the message, not just the timing: `terminal prompts disabled` is proof
+    // that `GIT_TERMINAL_PROMPT` reached the child, not just that the
+    // connection failed for some other reason.
     let port = spawn_401_server();
     let tmp = tempfile::tempdir().unwrap();
     let repo = repo(tmp.path());
@@ -356,8 +307,6 @@ async fn a_remote_demanding_credentials_fails_fast_instead_of_hanging() {
     let started = Instant::now();
     let out = GitCommand::new(&repo)
         .args(["fetch", &url])
-        // Generous on purpose: if the hardening failed, this would sit here for
-        // the full ten seconds rather than failing in under one.
         .run(Instant::now() + Duration::from_secs(10))
         .await
         .unwrap();
@@ -379,9 +328,6 @@ async fn a_remote_demanding_credentials_fails_fast_instead_of_hanging() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn capture_shares_the_discipline_but_returns_raw_bytes() {
-    // The probe's path. Same environment and same deadline; stdout stays bytes,
-    // because `git status -z` emits paths that need not be UTF-8 and decoding
-    // them would corrupt the thing being parsed.
     let tmp = tempfile::tempdir().unwrap();
     let repo = repo(tmp.path());
     std::fs::write(repo.join("a.txt"), "a\n").unwrap();
@@ -418,22 +364,15 @@ async fn capture_honours_the_deadline_too() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_argv_is_reportable_before_it_runs() {
-    // A plan sheet shows the exact argv, and a transcript wants a header.
     let cmd = GitCommand::new("/tmp").args(["fetch", "--prune", "origin"]);
     assert_eq!(cmd.argv(), vec!["git", "fetch", "--prune", "origin"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unroutable_remote_is_bounded_by_the_deadline_and_nothing_else() {
-    // An unreachable remote should fail in under two seconds. Measured on
-    // macOS against TEST-NET-2, a *silently dropped* route
-    // takes 4 s, 7 s, 11 s — and once, 75 s — and `http.connectTimeout` is not
-    // honoured by this git (its own error reports "after 4094 ms" with the
-    // option set). Nothing in this tool can shorten the OS TCP handshake.
-    //
-    // So the guarantee is the deadline, not a bound on git: the job is killed,
-    // its process group with it, and the batch moves on. That is what "no hang,
-    // ever" actually rests on — and the 75 s sample is why it has to.
+    // A silently dropped route (measured against TEST-NET-2) takes anywhere
+    // from 4 s to 75 s, and `http.connectTimeout` does not bound it. The
+    // guarantee here is the deadline, not a bound on git.
     let tmp = tempfile::tempdir().unwrap();
     let repo = repo(tmp.path());
     let started = Instant::now();
@@ -444,15 +383,11 @@ async fn an_unroutable_remote_is_bounded_by_the_deadline_and_nothing_else() {
         .unwrap();
     let elapsed = started.elapsed();
     assert!(!out.success());
-    // Either git gave up first or we killed it; either way it is bounded.
     assert!(elapsed < Duration::from_secs(3), "took {elapsed:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_refused_connection_fails_immediately() {
-    // The common shape of "unreachable" — a host that answers, refusing — and
-    // the one where the two-second criterion is met with room to spare. Port 1
-    // on loopback needs no network at all.
     let tmp = tempfile::tempdir().unwrap();
     let repo = repo(tmp.path());
     let started = Instant::now();
