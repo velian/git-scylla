@@ -11,10 +11,6 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-/// Lines of transcript kept per job in `--json`.
-///
-/// The full transcript is on disk for `log`; a JSON document with forty
-/// megabytes of fetch progress in it is not something `jq` can help with.
 const JSON_LOG_LINES: usize = 200;
 
 #[derive(Serialize)]
