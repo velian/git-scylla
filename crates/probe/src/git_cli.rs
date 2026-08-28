@@ -327,7 +327,7 @@ fn read_bare_head(git_dir: &Path) -> Option<Head> {
 /// The names it *can* answer are the ones bulk checkout is actually for: a
 /// local branch, a tag, and the remote-tracking branch git would DWIM into a
 /// local one.
-pub fn has_ref(git_dir: &Path, rev: &str) -> Option<bool> {
+pub(crate) fn has_ref(git_dir: &Path, rev: &str) -> Option<bool> {
     if looks_like_revision(rev) {
         return None;
     }
@@ -378,7 +378,7 @@ pub fn has_ref(git_dir: &Path, rev: &str) -> Option<bool> {
 ///
 /// Cold data, but a directory walk rather than a subprocess. Cold still
 /// matters — this runs once per plan, never per row.
-pub fn tags(git_dir: &Path) -> Vec<String> {
+pub(crate) fn tags(git_dir: &Path) -> Vec<String> {
     let root = git_dir.join("refs/tags");
     let mut out = Vec::new();
     // Tags nest (`refs/tags/release/1.0`), so this is a walk and not a listing.
@@ -429,7 +429,7 @@ pub fn tags(git_dir: &Path) -> Vec<String> {
 /// `None` means neither was found, and the caller must skip the repository by
 /// name rather than guess. There is no third guess worth making: whatever else
 /// this repository calls its trunk, the tool does not know it.
-pub fn default_branch(git_dir: &Path, remotes: &[String]) -> Option<String> {
+pub(crate) fn default_branch(git_dir: &Path, remotes: &[String]) -> Option<String> {
     // `origin` first when it exists, then the rest in configured order — the
     // same precedence `plan::preferred_remote` uses, for the same reason.
     let ordered =

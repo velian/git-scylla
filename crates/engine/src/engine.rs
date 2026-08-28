@@ -19,7 +19,9 @@ use git_scylla_core::{
     JobState, LogLine, RepoId, RepoSnapshot, SkipReason, Stream,
 };
 use git_scylla_discovery::{DiscoveryError, RepoFound, WalkOptions, Walker};
-use git_scylla_probe::{GitCliProbe, Probe, ProbeRequest};
+use git_scylla_probe::{
+    GitCliProbe, Probe, ProbeRequest, RefAnswer, RefError, RefQuery, RefRequest,
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -721,7 +723,7 @@ impl Actor {
                 _ = fetch_tick.tick(), if accepting => self.fetch_due(),
                 cmd = cmd_rx.recv(), if accepting => match cmd {
                     Some(Cmd::Shutdown) | None => accepting = false,
-                    Some(cmd) => self.on_cmd(cmd),
+                    Some(cmd) => self.on_cmd(cmd).await,
                 },
                 msg = internal_rx.recv() => match msg {
                     Some(msg) => self.on_internal(msg).await,
@@ -748,7 +750,13 @@ impl Actor {
 
     // ---- commands ------------------------------------------------------
 
-    fn on_cmd(&mut self, cmd: Cmd) {
+    /// Async only because planning asks the probe a ref question.
+    ///
+    /// Every other arm is synchronous and stays that way. Awaiting here does
+    /// stop the actor serving the next command until the plan is resolved — but
+    /// it *yields*, so the probes and jobs on other tasks keep moving, which is
+    /// exactly what a blocking `refs/` walk on this task took away from them.
+    async fn on_cmd(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::StartScan { roots, nested, reply } => {
                 // Here rather than at construction, for two reasons: the roots
@@ -811,9 +819,9 @@ impl Actor {
             Cmd::Plan { action, sel, reply } => {
                 let snaps = self.sorted_snapshots();
                 let mut p = plan(&action, &snaps, &sel, SystemTime::now(), &self.config.policy);
-                self.narrow_to_existing_refs(&mut p);
-                self.resolve_default_branches(&mut p);
-                self.resolve_tag_names(&mut p);
+                self.narrow_to_existing_refs(&mut p).await;
+                self.resolve_default_branches(&mut p).await;
+                self.resolve_tag_names(&mut p).await;
                 let _ = reply.send(p);
             }
 
@@ -973,27 +981,72 @@ impl Actor {
     /// for the plan that needs it.
     ///
     /// Not a subprocess: `git rev-parse` per repository per plan is a cost the
-    /// GUI would pay every time somebody proposes an action. `has_ref` reads
+    /// GUI would pay every time somebody proposes an action. The probe reads
     /// `refs/` and `packed-refs`, and **declines to answer** for anything
     /// carrying revision syntax — those are let through to try, because
     /// refusing a checkout that would have worked is worse than a job that
     /// fails with a good message.
-    fn narrow_to_existing_refs(&self, p: &mut Plan) {
-        let Action::Checkout { create: false, .. } = p.action else { return };
-        self.refine(p, |actor, id, action| {
+    ///
+    /// **Only `Some(false)` skips**, and that is the whole rule. A repository
+    /// the probe could not read is let through for the same reason a revision
+    /// expression is: `RefNotFound` would be a claim about this repository's
+    /// refs, and an unreadable git directory is not evidence for it.
+    async fn narrow_to_existing_refs(&self, p: &mut Plan) {
+        let Action::Checkout { create: false, ref rev } = p.action else { return };
+        let answers = self.ask_refs(p, RefQuery::Exists { rev: rev.clone() }).await;
+        self.refine(p, |_, id, action| {
             let Action::Checkout { rev, .. } = &action else { return Ok(action) };
-            let rev = rev.clone();
-            let missing = actor
-                .found
-                .get(id)
-                .and_then(|f| git_scylla_probe::has_ref(&f.git_dir, &rev))
-                .is_some_and(|present| !present);
-            if missing {
-                Err(SkipReason::RefNotFound(rev))
-            } else {
-                Ok(action)
+            match answers.get(id) {
+                Some(Ok(RefAnswer::Exists(Some(false)))) => {
+                    Err(SkipReason::RefNotFound(rev.clone()))
+                }
+                _ => Ok(action),
             }
         });
+    }
+
+    /// Ask the probe one ref question about every repository still eligible.
+    ///
+    /// **One call for the plan, not one per row.** That is what takes a hundred
+    /// `refs/` walks off this task: the adapter gets the whole batch and hands
+    /// it to a blocking pool in one go, and the actor awaits instead of pinning
+    /// a runtime worker while it reads directories.
+    ///
+    /// Keyed by id on the way back rather than by position. `refine` walks the
+    /// plan again afterwards, and lining two vectors up by index across that
+    /// gap is exactly the bookkeeping that used to drop a repository into
+    /// neither list. An id with no entry — no `found` to read, or an adapter
+    /// that answered short — is one the caller accounts for as a skip, which is
+    /// the safe direction to be wrong in.
+    async fn ask_refs(
+        &self,
+        p: &Plan,
+        query: RefQuery,
+    ) -> HashMap<RepoId, Result<RefAnswer, RefError>> {
+        let mut ids = Vec::with_capacity(p.eligible.len());
+        let mut reqs = Vec::with_capacity(p.eligible.len());
+        for (id, _) in &p.eligible {
+            // No `found` is no git directory to read, which is the same "we do
+            // not know what is in there" every one of these passes already
+            // treats as a skip.
+            let Some(found) = self.found.get(id) else { continue };
+            // Only `DefaultBranch` reads these, and only that pass has a
+            // snapshot to insist on. Defaulting to empty here keeps the other
+            // two working for a repository that has been found but not yet
+            // probed, which is what they do today.
+            let remotes = self
+                .snapshots
+                .get(id)
+                .map(|s| s.remotes.iter().map(|r| r.name.clone()).collect())
+                .unwrap_or_default();
+            ids.push(id.clone());
+            reqs.push(RefRequest { git_dir: found.git_dir.clone(), remotes });
+        }
+        // Cloned so the borrow of `self` ends before the await: the actor owns
+        // every map here, and holding one across a yield point is how the
+        // single-task invariant starts costing more than it buys.
+        let probe = Arc::clone(&self.probe);
+        ids.into_iter().zip(probe.refs(reqs, query).await).collect()
     }
 
     /// Rewrite a plan's eligible entries, moving what cannot be resolved to its
@@ -1033,15 +1086,23 @@ impl Actor {
     /// back to and whether anything is in the way, the filesystem says where to
     /// go. Splitting them would mean a partially-resolved action existing in
     /// between, which is what the `Option` exists to forbid.
-    fn resolve_default_branches(&self, p: &mut Plan) {
+    async fn resolve_default_branches(&self, p: &mut Plan) {
         let Action::SyncDefault { mode, .. } = p.action else { return };
+        let answers = self.ask_refs(p, RefQuery::DefaultBranch).await;
         self.refine(p, |actor, id, _| {
-            let Some((found, snap)) = actor.found.get(id).zip(actor.snapshots.get(id)) else {
+            let Some(snap) = actor.snapshots.get(id) else {
                 return Err(SkipReason::SnapshotStale);
             };
-            let remotes: Vec<String> = snap.remotes.iter().map(|r| r.name.clone()).collect();
-            let Some(default) = git_scylla_probe::default_branch(&found.git_dir, &remotes) else {
-                return Err(SkipReason::NoDefaultBranch);
+            let default = match answers.get(id) {
+                Some(Ok(RefAnswer::DefaultBranch(Some(name)))) => name.clone(),
+                // A real answer of "no trunk I can name".
+                Some(Ok(RefAnswer::DefaultBranch(None))) => {
+                    return Err(SkipReason::NoDefaultBranch)
+                }
+                // Unreadable, or no answer at all. **Not** `NoDefaultBranch`:
+                // this repository may well have one, and a plan that says it
+                // does not is a false sentence the user is about to act on.
+                _ => return Err(SkipReason::SnapshotStale),
             };
             // The precondition already refused a detached HEAD, which is the
             // case with no branch to come back to.
@@ -1094,10 +1155,11 @@ impl Actor {
     /// with `(already exists)` — but it is a real failure, and
     /// `FailureKind::TagExists` is what tells the user to fetch tags and try
     /// again.
-    fn resolve_tag_names(&self, p: &mut Plan) {
+    async fn resolve_tag_names(&self, p: &mut Plan) {
         let Action::DevTag { ref channel, bump, ref push, .. } = p.action else { return };
         let (channel, template_push) = (channel.clone(), push.clone());
-        self.refine(p, |actor, id, action| {
+        let answers = self.ask_refs(p, RefQuery::Tags).await;
+        self.refine(p, |_, id, action| {
             // The remote is already resolved per repository by `plan::resolve`;
             // only the name is missing, so the resolved action's own `push` is
             // the one to keep.
@@ -1105,9 +1167,14 @@ impl Actor {
                 Action::DevTag { push, .. } => push,
                 _ => template_push.clone(),
             };
-            let Some(found) = actor.found.get(id) else { return Err(SkipReason::SnapshotStale) };
-            let have = git_scylla_probe::tags(&found.git_dir);
-            let name = git_scylla_core::version::next_dev_tag(&have, &channel, bump);
+            // A repository that could not be read is skipped rather than
+            // treated as having no tags. The difference is not cosmetic: an
+            // empty list derives `dev.1`, so the plan would offer to cut a name
+            // this repository may well have used already.
+            let Some(Ok(RefAnswer::Tags(have))) = answers.get(id) else {
+                return Err(SkipReason::SnapshotStale);
+            };
+            let name = git_scylla_core::version::next_dev_tag(have, &channel, bump);
             Ok(Action::DevTag { channel: channel.clone(), bump, name: Some(name), push })
         });
     }

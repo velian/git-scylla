@@ -19,7 +19,11 @@ use std::time::Instant;
 pub use config::{host_of_url, parse_remotes};
 #[cfg(feature = "testkit")]
 pub use fake::{FakeProbe, FakeRepo};
-pub use git_cli::{default_branch, has_ref, tags, GitCliProbe};
+// `default_branch`, `has_ref` and `tags` are deliberately *not* exported. They
+// are how `GitCliProbe` answers a `RefQuery`, and nothing else. Published, they
+// were the door the engine went through instead of the seam — which is the leak
+// this module now exists to have closed.
+pub use git_cli::GitCliProbe;
 pub use gitdir::{detect_in_progress, resolve_common_dir};
 pub use porcelain::{parse_porcelain_v2, PorcelainStatus};
 
@@ -76,9 +80,10 @@ pub enum RefAnswer {
     /// distinct from [`RefError`].
     DefaultBranch(Option<String>),
     Tags(Vec<String>),
-    /// `None` when the name carries revision syntax and so cannot be answered
-    /// from the filesystem at all — see [`has_ref`]. The caller lets the job
-    /// try rather than refusing it.
+    /// `None` when the name carries revision syntax — `main~3`, a raw object
+    /// id — and so cannot be answered from the filesystem at all. The caller
+    /// lets the job try rather than refusing it, because refusing a checkout
+    /// that would have worked is worse than one that fails with a good message.
     Exists(Option<bool>),
 }
 

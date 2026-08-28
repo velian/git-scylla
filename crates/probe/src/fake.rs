@@ -113,7 +113,7 @@ impl FakeRepo {
     ///
     /// Exact, or the DWIM form: a stored `origin/main` answers a question about
     /// `main`, because `git checkout main` with no local branch creates one
-    /// from it. [`crate::has_ref`] does the same, and a fake that did not would
+    /// from it. The real probe does the same, and a fake that did not would
     /// pass tests the real probe fails.
     fn has(&self, rev: &str) -> bool {
         self.refs.iter().any(|r| r == rev || r.rsplit_once('/').is_some_and(|(_, b)| b == rev))
