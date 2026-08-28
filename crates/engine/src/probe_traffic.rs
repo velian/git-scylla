@@ -1,26 +1,21 @@
 //! Who gets probed, when, and who is still owed one.
 //!
-//! Three rules, and every one of them was a bug before it was a rule:
+//! Three rules:
 //!
 //! 1. **Exactly one re-probe.** A pull that writes a thousand files costs one
-//!    `git status`, not a thousand. Sets rather than queues are what make that
-//!    true however many times something asked.
+//!    `git status`, not a thousand — sets rather than queues, so repeated
+//!    requests collapse.
 //! 2. **Definite outranks observed.** A job finished, a repository was
-//!    discovered, the user pressed Refresh — there is exactly one of each, and
-//!    delaying the row that shows a job's result is the one thing a rate limit
-//!    must never do. A watcher's report is the opposite: a directory being
-//!    written to produces a fresh debounce window every 300 ms, for ever, and
-//!    each one would otherwise be a subprocess.
-//! 3. **One way out.** Nothing is started at the moment it is asked for.
-//!    Everything is noted, and [`ProbeTraffic::take_ready`] is the only way a
-//!    repository ever comes back out. The earlier version admitted some
-//!    requests immediately and deferred the rest, and keeping those two paths'
-//!    sets in step by hand is exactly where the redundant second probe came
-//!    from.
+//!    discovered, the user pressed Refresh: delaying the row that shows a
+//!    job's result is the one thing the rate limit must never do. A watcher's
+//!    report is noisier — a directory being written to re-triggers every
+//!    debounce window — so only that path is rate-limited.
+//! 3. **One way out.** Nothing starts the moment it's asked for; everything is
+//!    noted, and [`ProbeTraffic::take_ready`] is the only way a repository
+//!    comes back out.
 //!
-//! **No clock of its own.** `now` is an argument, the same discipline `policy`
-//! keeps and for the same reason: it is what lets the rules be tested by
-//! stating a time rather than by sleeping through one. No tokio either — this
+//! **No clock of its own.** `now` is an argument, so the rules can be tested
+//! by stating a time rather than sleeping through one. No tokio either — this
 //! decides, and the actor spawns.
 
 use git_scylla_core::RepoId;
@@ -37,15 +32,13 @@ pub enum Why {
     Observed,
 }
 
-/// The admission state for probing: who is owed one, who has one in flight, and
-/// when each was last started.
+/// The admission state for probing: who is owed one, who has one in flight,
+/// and when each was last started.
 ///
-/// Ordered collections rather than hashed ones. The sets are small and this is
-/// not a hot path, and what it buys is a stable order out of
-/// [`Self::take_ready`] — which makes the tests state a result rather than sort
-/// one.
+/// `BTreeSet`/`BTreeMap` rather than hashed: the sets are small, and this
+/// buys a stable order out of [`Self::take_ready`] so tests can assert one.
 pub struct ProbeTraffic {
-    /// The least time between two probes of one repository, for requests that
+    /// Least time between two probes of one repository, for requests that
     /// came from watching rather than from knowing.
     interval: Duration,
     /// Repositories with a probe in flight, so two never race.
@@ -54,11 +47,9 @@ pub struct ProbeTraffic {
     definite: BTreeSet<RepoId>,
     /// Owed one because a watcher saw something. Only these are rate-limited.
     observed: BTreeSet<RepoId>,
-    /// When each repository was last *started*, for the rate limit.
-    ///
-    /// `Instant` rather than the snapshot's `probed_at`: this is about how
-    /// often work is begun, which a wall clock that can move is the wrong tool
-    /// for, and a probe still running has no `probed_at` yet.
+    /// When each repository was last *started*, for the rate limit. An
+    /// `Instant`, not the snapshot's `probed_at`: a probe still running has
+    /// no `probed_at` yet.
     last: BTreeMap<RepoId, Instant>,
 }
 
@@ -73,23 +64,19 @@ impl ProbeTraffic {
         }
     }
 
-    /// Record that this repository wants probing.
+    /// Record that this repository wants probing. Takes no `now`: noting a
+    /// request doesn't admit it, and the interval is only checked later, by
+    /// [`Self::take_ready`].
     ///
-    /// Takes no `now`, because nothing here is decided yet: noting a request is
-    /// not admitting it, and the only time-dependent question — has the
-    /// interval elapsed — is asked by [`Self::take_ready`] against the moment
-    /// it is asked.
+    /// Asked about twice, a repository is owed one probe, not two; asked
+    /// about both ways, it's owed a *definite* one, so a watcher's report can
+    /// never downgrade a job's result into something the rate limit may sit
+    /// on.
     ///
-    /// A repository asked about twice is owed one probe, not two. Asked about
-    /// both ways, it is owed a *definite* one: the stronger claim wins, so a
-    /// watcher's report can never downgrade a job's result into something the
-    /// rate limit may sit on.
-    ///
-    /// **Only note a repository the caller will eventually be able to start.**
-    /// What is owed is deferred, never dropped, and it holds [`Self::is_idle`]
-    /// false — so noting one that can never start is how a caller ends up
-    /// unable to wind down. Filtering that is the caller's job, because only it
-    /// knows what it can act on.
+    /// **Only note a repository the caller will eventually be able to
+    /// start.** What is owed is deferred, never dropped, and holds
+    /// [`Self::is_idle`] false — the caller alone knows what it can act on,
+    /// so filtering is the caller's job.
     pub fn note(&mut self, repo: &RepoId, why: Why) {
         match why {
             Why::Definite => {
@@ -106,17 +93,16 @@ impl ProbeTraffic {
 
     /// Everything that may start right now, marked as started.
     ///
-    /// **The only exit.** A repository in the returned vector has been moved
-    /// out of what is owed and into what is in flight, and the caller is
-    /// obliged to start it — which is why `can_start` must answer for every
-    /// reason a caller might fail to, not only for whether a job holds the
-    /// repository. Nothing runs between the predicate answering and the caller
-    /// acting: the actor is one task and its pump is synchronous.
+    /// **The only exit.** A returned repository moves from owed to in
+    /// flight, and the caller must start it — so `can_start` needs to answer
+    /// for every reason a caller might fail to, not just whether a job holds
+    /// the repository.
     ///
     /// Definite requests first and without a rate limit, then what a watcher
-    /// merely saw, at most once per `interval` per repository. Deferred rather
-    /// than dropped: the caller's loop wakes on its other timers, and a
-    /// repository held back here is taken on a later pass.
+    /// merely saw, at most once per `interval` per repository. A repository
+    /// held back here is deferred, not dropped, and taken on a later pass.
+    /// The actor is one task with a synchronous pump, so nothing runs
+    /// between `can_start` answering and the caller acting on the result.
     pub fn take_ready(&mut self, now: Instant, can_start: impl Fn(&RepoId) -> bool) -> Vec<RepoId> {
         let (probing, last, interval) = (&self.probing, &self.last, self.interval);
         let free = |r: &RepoId| !probing.contains(r) && can_start(r);
@@ -126,10 +112,8 @@ impl ProbeTraffic {
         ready.extend(self.observed.iter().filter(|r| free(r) && due(r)).cloned());
 
         for repo in &ready {
-            // Both sets: a probe starting now reads the state as it is, so it
-            // satisfies every request owed to this repository however it was
-            // asked for. Leaving the other entry is what fired a second,
-            // redundant probe the moment the first one finished.
+            // Clear both sets: a probe starting now covers every request
+            // owed, however it was asked for.
             self.definite.remove(repo);
             self.observed.remove(repo);
             self.probing.insert(repo.clone());
@@ -144,12 +128,9 @@ impl ProbeTraffic {
         self.probing.remove(repo);
     }
 
-    /// This repository is gone. Forget everything about it, `last` included.
-    ///
-    /// The old version cleared what was owed and left the timestamp behind, so
-    /// the map grew for the life of the process and a repository that came back
-    /// under the same path found its first watcher-driven probe rate-limited by
-    /// a reading from before it left.
+    /// This repository is gone. Forget everything about it, `last` included,
+    /// so a repository that returns under the same path isn't rate-limited
+    /// by a reading from before it left.
     pub fn forget(&mut self, repo: &RepoId) {
         self.probing.remove(repo);
         self.definite.remove(repo);
@@ -182,8 +163,6 @@ mod tests {
 
     #[test]
     fn a_storm_of_requests_collapses_to_one_probe() {
-        // The rule the watcher exists to survive: a pull writing a thousand
-        // files must not cost a thousand `git status`.
         let mut t = traffic();
         let now = Instant::now();
         for _ in 0..1000 {
@@ -196,8 +175,6 @@ mod tests {
 
     #[test]
     fn a_definite_request_is_never_rate_limited() {
-        // A job finished. Delaying the row that shows its result is the one
-        // thing the limit must not do, so the interval does not apply.
         let mut t = traffic();
         let now = Instant::now();
         t.note(&repo("a"), Why::Definite);
@@ -233,13 +210,10 @@ mod tests {
 
     #[test]
     fn a_definite_request_outranks_an_observed_one_for_the_same_repository() {
-        // Both arrive while the repository is busy. The definite one must win,
-        // or a job's result would sit behind a rate limit that exists for
-        // watcher noise.
         let mut t = traffic();
         let now = Instant::now();
         t.note(&repo("a"), Why::Observed);
-        // Stamp a recent probe, so the rate limit would hold an observed one.
+        // Stamp a recent probe, so the rate limit would otherwise hold an observed one.
         assert_eq!(t.take_ready(now, anything), vec![repo("a")]);
         t.finished(&repo("a"));
 
@@ -265,8 +239,6 @@ mod tests {
 
     #[test]
     fn a_probe_in_flight_blocks_a_second_one_for_the_same_repository() {
-        // Two probes of one repository must never race, whatever asked for
-        // them.
         let mut t = traffic();
         let now = Instant::now();
         t.note(&repo("a"), Why::Definite);
@@ -283,9 +255,6 @@ mod tests {
 
     #[test]
     fn forgetting_a_repository_forgets_when_it_was_last_probed() {
-        // The leak, as behaviour rather than as memory: a repository that came
-        // back under the same path used to find its first watcher-driven probe
-        // held by a reading taken before it went away.
         let mut t = traffic();
         let now = Instant::now();
         t.note(&repo("a"), Why::Observed);
@@ -318,14 +287,8 @@ mod tests {
 
     #[test]
     fn what_the_caller_refuses_stays_owed_and_holds_idle_open() {
-        // Deferred, never dropped — being dropped here is how a repository ends
-        // up in neither the owed set nor in flight.
-        //
-        // It is also the reason `note` has a precondition. A caller that noted
-        // something it can never start would hold `is_idle` false for ever, and
-        // an engine that cannot go idle cannot shut down. Only the caller knows
-        // the difference between "busy just now" and "not mine at all", so only
-        // the caller can filter it.
+        // This is why `note` has a precondition: noting something the caller
+        // can never start would hold `is_idle` false forever.
         let mut t = traffic();
         let now = Instant::now();
         t.note(&repo("held"), Why::Definite);

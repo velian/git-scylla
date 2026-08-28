@@ -1,19 +1,16 @@
 //! Deciding what may run right now.
 //!
-//! Three independent constraints, and the whole crate's job is to satisfy all
-//! of them at once without any of them being able to deadlock the others:
+//! Three constraints, satisfied together without deadlocking each other:
 //!
 //! * **One job per repository, ever.** Two concurrent `git` processes in one
-//!   repository contend for `index.lock` and produce failures that look like
-//!   bugs.
+//!   repository contend for `index.lock`.
 //! * **Global concurrency**, separately for network and local work.
-//! * **Per-host concurrency** for network work, so fifty fetches against one
+//! * **Per-host concurrency** for network work, so many fetches against one
 //!   host do not invite rate limiting or SSH `MaxSessions` refusals.
 //!
-//! Permits are acquired **by the scheduler, before spawning**, and then moved
-//! into the task so they release on drop. Acquiring inside the task would be
-//! simpler to write and wrong: whoever won the race would run, and the priority
-//! class and the per-host cap would both become suggestions.
+//! Permits are acquired by the scheduler, before spawning, and moved into the
+//! task so they release on drop — acquiring inside the task would let the
+//! priority class and per-host cap become mere suggestions.
 
 use git_scylla_core::{JobId, JobOrigin, RepoId};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -24,11 +21,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 /// Concurrency and deadline limits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Limits {
-    /// Concurrent network jobs across all hosts.
-    ///
-    /// Eight, because the constraint is the far end: fifty simultaneous fetches
-    /// against one provider invites rate limiting, and SSH `MaxSessions`
-    /// refusals look like authentication failures.
+    /// Concurrent network jobs across all hosts. Eight: the constraint is the
+    /// far end, which rate-limits or refuses SSH `MaxSessions` past that.
     pub network: usize,
     /// Concurrent local jobs. `num_cpus`, because local work is CPU- and
     /// disk-bound rather than latency-bound.
@@ -36,11 +30,9 @@ pub struct Limits {
     /// Concurrent network jobs against any single host.
     pub per_host: usize,
     pub network_timeout: Duration,
-    /// Deadline for local jobs.
-    ///
-    /// Five seconds is right for `checkout` and `stash` and wrong for `commit`,
-    /// whose hooks are the user's own test suite. `Limits` is data so a caller
-    /// can raise it for one action rather than for all of them.
+    /// Deadline for local jobs. Five seconds suits `checkout`/`stash`; a
+    /// caller can raise it per-action for something like `commit`, whose
+    /// hooks run the user's own test suite.
     pub local_timeout: Duration,
 }
 
@@ -57,33 +49,24 @@ impl Default for Limits {
 }
 
 /// A job waiting to run, reduced to what scheduling needs to know.
-///
-/// Deliberately not a `&Job`: the scheduler is a state machine over identity,
-/// class and resource, and giving it the whole job would let it start reading
-/// things it has no business deciding from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ticket {
     pub job: JobId,
     pub repo: RepoId,
-    /// Bucket key for the per-host cap. `None` shares one bucket — a path
-    /// remote and an unparseable URL contend with each other and with nothing
-    /// else, which is the right answer for both.
+    /// Bucket key for the per-host cap. `None` shares one bucket: a path
+    /// remote and an unparseable URL contend with each other and nothing else.
     pub host: Option<String>,
     pub class: JobOrigin,
     pub network: bool,
 }
 
-/// A job cleared to start, with the permits that authorise it.
-///
-/// The permits must be moved into the spawned task. Dropping this without
-/// spawning releases them, which is correct but wasteful.
+/// A job cleared to start, with the permits that authorise it. Dropping this
+/// without spawning releases the permits.
 #[derive(Debug)]
 pub struct Launch {
     pub job: JobId,
-    /// The repository this job holds. Carried so that a caller which decides
-    /// not to start the job after all can still hand it back with
-    /// [`Scheduler::finished`] — the marker is set here, inside `launchable`,
-    /// and a caller who cannot name the repository cannot release it.
+    /// Carried so a caller that decides not to start the job can still hand
+    /// it back via [`Scheduler::finished`].
     pub repo: RepoId,
     pub timeout: Duration,
     pub permits: Permits,
@@ -101,8 +84,7 @@ pub struct Scheduler {
     limits: Limits,
     network: Arc<Semaphore>,
     local: Arc<Semaphore>,
-    /// Created lazily: a working set touches a handful of hosts, and a
-    /// pre-populated map would need to know them in advance.
+    /// Created lazily as hosts are seen.
     hosts: HashMap<Option<String>, Arc<Semaphore>>,
     /// Ready to run, in arrival order, one queue per priority class.
     ready: [VecDeque<Ticket>; 2],
@@ -135,12 +117,10 @@ impl Scheduler {
         &self.limits
     }
 
-    /// Accept a job.
-    ///
-    /// If its repository already has something in flight the job waits in that
-    /// repository's own queue and is not considered for launch at all — which is
-    /// what makes per-repository serialization a property of the data structure
-    /// rather than of a check someone might forget.
+    /// Accept a job. If its repository already has something in flight, the
+    /// job goes to that repository's own queue instead of `ready` — making
+    /// per-repository serialization a property of the data structure, not a
+    /// check someone could forget.
     pub fn enqueue(&mut self, ticket: Ticket) {
         if self.busy.contains(&ticket.repo) {
             self.per_repo.entry(ticket.repo.clone()).or_default().push_back(ticket);
@@ -149,19 +129,15 @@ impl Scheduler {
         }
     }
 
-    /// Everything that can start now, in priority order.
-    ///
-    /// `User` before `Background`, FIFO within a class — with one deliberate
-    /// exception. A job whose *host* is saturated does **not** block the jobs
-    /// behind it. Strict FIFO would let one slow or rate-limited host stall a
-    /// whole batch, so the queue is scanned in order and everything launchable
-    /// launches; the rest keep their places.
+    /// Everything that can start now, in priority order: `User` before
+    /// `Background`, FIFO within a class, except that a job whose host is
+    /// saturated does not block the jobs behind it in the queue.
     pub fn launchable(&mut self) -> Vec<Launch> {
         let mut launched = Vec::new();
         for class in 0..self.ready.len() {
             let mut deferred = VecDeque::new();
             while let Some(ticket) = self.ready[class].pop_front() {
-                // Its repository may have gone busy since it was queued.
+                // May have gone busy since it was queued.
                 if self.busy.contains(&ticket.repo) {
                     self.per_repo.entry(ticket.repo.clone()).or_default().push_back(ticket);
                     continue;
@@ -184,12 +160,8 @@ impl Scheduler {
         launched
     }
 
-    /// Global first, then per-host — **always in that order**.
-    ///
-    /// Two call sites acquiring in opposite orders is a classic deadlock, so
-    /// there is exactly one call site and it is this function. If the per-host
-    /// permit is refused the global one is released by dropping it, so a
-    /// saturated host cannot leak global capacity.
+    /// Global permit first, host permit second, always — the fixed order
+    /// rules out deadlock between the two.
     fn acquire(&mut self, ticket: &Ticket) -> Option<Permits> {
         if !ticket.network {
             let global = Arc::clone(&self.local).try_acquire_owned().ok()?;
@@ -203,7 +175,7 @@ impl Scheduler {
         );
         match host_sem.try_acquire_owned() {
             Ok(host) => Some(Permits { _global: global, _host: Some(host) }),
-            // `global` drops here, returning the slot.
+            // `global` drops here, releasing it.
             Err(_) => None,
         }
     }
@@ -216,13 +188,9 @@ impl Scheduler {
         }
     }
 
-    /// A job finished. Releases its repository and promotes the next job queued
-    /// against it, if any.
-    ///
-    /// The caller must have dropped the job's [`Permits`] first, or the freed
-    /// capacity will not be visible until the next pump. That is a delay and
-    /// not a bug, which is why the permits are RAII rather than a counter the
-    /// caller could forget to decrement.
+    /// A job finished. Releases its repository and promotes the next job
+    /// queued against it, if any. The caller must drop the job's [`Permits`]
+    /// first, or freed capacity won't be visible until the next pump.
     pub fn finished(&mut self, repo: &RepoId) {
         self.busy.remove(repo);
         if let Some(queue) = self.per_repo.get_mut(repo) {
@@ -235,11 +203,9 @@ impl Scheduler {
         }
     }
 
-    /// Remove every queued job matching `pred`, returning them.
-    ///
-    /// For batch cancellation: queued jobs become `Cancelled` without ever
-    /// having run, while running ones are killed through their process group by
-    /// `crates/exec`.
+    /// Remove every queued job matching `pred`, returning them, for batch
+    /// cancellation. Running jobs are killed separately, through their
+    /// process group, by `crates/exec`.
     pub fn drain_queued(&mut self, pred: impl Fn(&Ticket) -> bool) -> Vec<Ticket> {
         let mut removed = Vec::new();
         for queue in &mut self.ready {
@@ -358,8 +324,7 @@ mod tests {
             s.enqueue(net(i as u64, i, Some(host)));
         }
         let launched = s.launchable();
-        // Three hosts x 2 = 6, under the global cap of 8. The global cap must
-        // not be the thing that limits us here.
+        // 3 hosts x 2 = 6, under the global cap of 8: per-host is the binding constraint.
         assert_eq!(launched.len(), 6, "expected 2 per host across 3 hosts");
         assert!(launched.len() < 8, "and the global cap should not be the binding constraint");
     }
@@ -525,15 +490,13 @@ mod tests {
 
     #[test]
     fn a_launch_names_its_repository_so_it_can_be_handed_back() {
-        // The marker is set inside `launchable`, so a caller that decides not to
-        // start the job needs a way to release it. Without this the repository
-        // stays busy forever and the engine never goes idle.
+        // Without this a caller that declines to run the job can never release it.
         let mut s = Scheduler::new(limits(4, 4));
         s.enqueue(net(1, 7, Some("h")));
         let launched = s.launchable();
         assert_eq!(launched[0].repo, repo(7));
 
-        // Hand it straight back without ever running it.
+        // Hand it back without running it.
         let handed_back = launched[0].repo.clone();
         drop(launched);
         s.finished(&handed_back);

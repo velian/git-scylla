@@ -22,10 +22,6 @@ pub struct JobOutcome {
 }
 
 /// Run every step of `action` against `repo`.
-///
-/// The step loop is general even though almost every action has one step:
-/// exercising the multi-step path routinely is what keeps it from being dead
-/// code that first runs in anger.
 pub async fn run_job(
     repo: &Path,
     action: &Action,
@@ -70,9 +66,7 @@ pub async fn run_job(
             failure = Some(match state {
                 StepState::Cancelled => JobState::Cancelled,
                 StepState::Failed { code } => JobState::Failed { code },
-                // A timeout leaves no exit code; report it as a failure with the
-                // conventional signal-terminated code rather than inventing a
-                // new JobState the plan cannot render.
+                // A timeout has no exit code; treat it as a failure with code -1.
                 _ => JobState::Failed { code: -1 },
             });
         } else {
@@ -80,22 +74,13 @@ pub async fn run_job(
         }
     }
 
-    // After the forward pass, and **whether or not it failed**.
-    // A step that opened something owes the close either way: `Commit` declares
-    // no compensation and is unaffected, while a sync owes its `stash pop` on
-    // the success path more often than on the failure one.
-    //
-    // Placed here rather than inside the loop so the transcript reads in the
-    // order things happened: every forward step, including the ones that never
-    // ran, and then the cleanup.
+    // Runs after the forward pass regardless of outcome, and outside the loop
+    // so the transcript lists every forward step first, then cleanup.
     let before_cleanup = runs.len();
     compensate(repo, &steps[..completed], per_step_timeout, extra_env, &mut log, &mut runs).await;
 
-    // A cleanup that failed is a job that failed, even when every forward step
-    // worked. Found by running a sync rather than by reading it: a `stash pop`
-    // that conflicts leaves markers in a tracked file, and the job reported
-    // `ok` because only the forward pass was consulted. "Succeeded" is not
-    // something to say about a repository the user has to go and repair.
+    // A cleanup that failed makes the job failed, even if every forward step
+    // succeeded.
     if failure.is_none() {
         failure = runs[before_cleanup..].iter().find_map(|r| match r.state {
             StepState::Failed { code } => Some(JobState::Failed { code }),
@@ -104,9 +89,8 @@ pub async fn run_job(
     }
 
     let state = failure.unwrap_or(JobState::Ok);
-    // Only for a job that has something to undo. A `Fetch` cannot move HEAD, and
-    // spending a `rev-parse` per repository per fetch cycle to learn that again
-    // is exactly the kind of cost automatic fetching cannot carry.
+    // Only when mutating and successful: a `Fetch` can't move HEAD, and there's
+    // no point paying for a `rev-parse` on every non-mutating job.
     let head_after = if action.is_mutating() && state == JobState::Ok {
         head_of(repo, cancel, extra_env).await
     } else {
@@ -150,15 +134,12 @@ async fn run_step(
 
 /// Run the compensating commands of `completed`, newest first.
 ///
-/// Not cancellable, deliberately: this *is* the cleanup. A cancellation that
-/// aborted the compensation would leave exactly the half-finished state the
-/// compensation exists to prevent.
+/// Not cancellable: a cancelled cleanup would leave exactly the half-finished
+/// state it exists to prevent.
 ///
-/// **Stops at the first failure**, marking the rest `NotRun`. Each compensation
-/// assumes the ones already run have put the repository back; a `stash pop`
-/// after a failed `checkout` would apply the user's work to the branch they
-/// were being moved *off*, which is worse than leaving it on the stack where
-/// the transcript says it is.
+/// Stops at the first failure, marking the rest `NotRun`: each compensation
+/// assumes the earlier ones succeeded, so continuing could apply changes
+/// against the wrong state.
 async fn compensate(
     repo: &Path,
     completed: &[Step],
@@ -222,9 +203,8 @@ async fn head_of(
         .args(["rev-parse", "--verify", "HEAD"])
         .cancel_with(cancel.clone())
         .envs(extra_env);
-    // Short deadline: this is one ref lookup with no network and no locks. If it
-    // cannot answer in five seconds the repository has bigger problems, and the
-    // job's own deadline should not be spent here.
+    // Short deadline: a local ref lookup that can't finish in 5s means bigger
+    // problems, and shouldn't eat into the job's own deadline.
     let out = cmd.capture(Instant::now() + Duration::from_secs(5)).await.ok()?;
     if !out.success() {
         return None;
@@ -298,12 +278,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_cleanup_stops_the_ones_behind_it() {
-        // The rule that keeps a sync from doing harm when it cannot finish. The
-        // compensations run in reverse — switch back, *then* pop — and each
-        // assumes the one before it worked. If the switch back fails the
-        // repository is on the wrong branch, and popping there would apply the
-        // user's work to a branch they were being moved off. Leaving it on the
-        // stack is recoverable; applying it to the wrong branch is not.
+        // Reverse order: if the switch back fails, popping would apply the
+        // user's work to the wrong branch.
         let tmp = tempfile::tempdir().unwrap();
         let repo = stashed_repo(tmp.path());
         assert_eq!(stash_count(&repo), 1);

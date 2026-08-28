@@ -1,13 +1,9 @@
-//! The actor.
+//! The actor: a single `tokio::task` owning every mutable map — snapshots,
+//! jobs, batches, scans, the scheduler, probe bookkeeping.
 //!
-//! A single `tokio::task` owns every mutable map. A walker, a probe pool, a job
-//! scheduler, a watcher and a fetch tick all write to the same state, and
-//! `Arc<Mutex<HashMap>>` under that load makes cancellation and ordering hard to
-//! reason about. One task is a serialization point for free.
-//!
-//! Nothing here blocks. The walk runs on a blocking thread, probes and jobs run
-//! as spawned tasks, and all of them report back through one internal channel
-//! that the actor drains in the same loop as its commands.
+//! The actor loop never blocks. The walk runs on a blocking thread; probes and
+//! jobs run as spawned tasks. All report back through one internal channel the
+//! actor drains alongside its commands.
 
 use crate::plan::{plan, Plan};
 use crate::policy::{after_attempt, due, manual_attempt, Attempt, FetchPolicy, Policy};
@@ -37,16 +33,10 @@ const CACHE_DEBOUNCE: Duration = Duration::from_secs(2);
 
 /// The least time between two probes of one repository, for requests that came
 /// from watching rather than from knowing.
-///
-/// Handed to [`ProbeTraffic`] rather than read here: the rule that uses it
-/// lives there, and a constant read from two modules is one that can be changed
-/// in one of them.
 const PROBE_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Sent as a plain number, not ts-rs's default `bigint` for `u64`: Tauri's IPC
-/// is JSON, `serde_json` writes a number, and JavaScript reads one. A generated
-/// type that says `bigint` would be a lie of exactly the kind generating them is
-/// meant to prevent. Session counters never approach 2^53.
+/// Serialized as a plain number, not ts-rs's default `bigint` for `u64`: Tauri's
+/// IPC is JSON, and session counters never approach 2^53.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
@@ -92,24 +82,18 @@ pub enum Cmd {
     Invalidate {
         what: git_scylla_watch::Invalidation,
     },
-    /// Whether a watcher is covering the roots.
-    ///
-    /// The engine does not own the watcher — the shell does, and the CLI has
-    /// none — so it has to be told. It changes what a snapshot's *age* means:
-    /// with coverage, an old snapshot is one nothing has changed, and without
-    /// it, one nobody has checked.
+    /// Whether a watcher is covering the roots. Changes what a snapshot's age
+    /// means: with coverage, an old snapshot is one nothing has changed;
+    /// without it, one nobody has checked.
     SetWatched {
         covered: bool,
     },
     Snapshot {
         reply: oneshot::Sender<Vec<RepoSnapshot>>,
     },
-    /// The ids matching a selection.
-    ///
-    /// Distinct from `Snapshot` because the filter box asks this on every
-    /// debounced keystroke and wants only the ids: answering it by shipping
-    /// every snapshot out of the actor and filtering on the far side cloned the
-    /// whole working set to throw almost all of it away.
+    /// The ids matching a selection. Distinct from `Snapshot`: returns only
+    /// ids, for callers that would otherwise clone and filter the whole
+    /// working set.
     Select {
         sel: Selection,
         reply: oneshot::Sender<Vec<RepoId>>,
@@ -122,13 +106,10 @@ pub enum Cmd {
         batch: BatchId,
         reply: oneshot::Sender<Vec<Job>>,
     },
-    /// What undoing a finished batch would do.
-    ///
-    /// A re-probe of every affected repository is requested first, because the
-    /// guards are only as good as the snapshot they read. It is a *request*,
-    /// not a wait: the staleness guard is what makes the freshness enforceable,
-    /// so a plan computed before the probes land refuses by name rather than
-    /// acting on old facts.
+    /// What undoing a finished batch would do. Requests a re-probe of every
+    /// affected repository first, without waiting: a plan computed before the
+    /// probes land is refused by the staleness guard rather than acting on old
+    /// facts.
     PlanUndo {
         batch: BatchId,
         reply: oneshot::Sender<Plan>,
@@ -140,67 +121,43 @@ pub enum Cmd {
         reply: oneshot::Sender<BatchId>,
     },
     /// The background jobs still retained, bounded by
-    /// [`Config::background_history`].
-    ///
-    /// A drawer filtering on origin reads these from the event stream; this is
-    /// for a surface that arrived late, and for the CLI's daemon.
+    /// [`Config::background_history`]. For a surface that subscribed late, or
+    /// has none — the CLI's daemon.
     BackgroundJobs {
         reply: oneshot::Sender<Vec<Job>>,
     },
     /// Stop accepting commands and wind down.
-    ///
-    /// Explicit rather than "when the last handle drops": handles are cloned
-    /// freely — the CLI holds one while a caller holds another — so dropping one
-    /// says nothing about whether anyone still wants the engine.
     Shutdown,
 }
 
-/// Everything the actor publishes.
-///
-/// Serializable because the desktop bridge forwards these straight to the
-/// webview. The TypeScript is generated from this enum; a hand-written mirror
-/// would drift.
+/// Everything the actor publishes. Serializable: forwarded straight to the
+/// webview, and the TypeScript bindings are generated from this enum.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "value")]
 pub enum Event {
     ReposUpserted(Vec<RepoSnapshot>),
-    /// Repositories that are no longer on disk.
-    ///
-    /// Only a watcher can observe one going away. A row for a directory the
-    /// user deleted is worse than no row: every action offered on it will fail.
+    /// Repositories that are no longer on disk. Only a watcher can observe
+    /// one going away.
     ReposRemoved(Vec<RepoId>),
-    /// Progress of one scan.
-    ///
-    /// Carries the `ScanId`: without it a consumer cannot tell two concurrent
-    /// scans apart, and there are two the moment the user adds a root while one
-    /// is running, or presses Refresh.
+    /// Progress of one scan. Carries the `ScanId`, since two scans can run at
+    /// once.
     ScanProgress {
         scan: ScanId,
         found: usize,
         probed: usize,
     },
-    /// A scan finished, with whatever it could not read.
-    ///
-    /// `errors` are the places the walk could not read — a root that does not
-    /// exist, or a directory macOS refused. Structured rather than stringified,
-    /// because the UI has to distinguish "that path is wrong" from "I was not
-    /// allowed to look": the second is almost always TCC, and saying so is the
-    /// highest-value error message in the application.
+    /// A scan finished, with whatever it could not read. `errors` are
+    /// structured, not stringified, so a caller can distinguish an invalid
+    /// path from a permissions refusal.
     ScanDone {
         scan: ScanId,
         errors: Vec<DiscoveryError>,
     },
-    /// One job moved. Emitted for **every** state a job reaches, `Queued`
-    /// included, so the stream alone is enough to know a job exists.
-    ///
-    /// `batch` and `origin` are carried rather than left to be looked up. A
-    /// consumer that has to ask the engine which batch a job belongs to cannot
-    /// attribute the events that arrive before its answer does, and the ones a
-    /// user batch emits arrive before `start_batch` has even returned its id.
-    /// `origin` is here for the same reason: the drawer filters on it, and it
-    /// filters jobs nobody asked for, so it cannot have learned about them from
-    /// a call it made.
+    /// One job moved. Emitted for every state a job reaches, `Queued`
+    /// included, so the stream alone is enough to know a job exists. Carries
+    /// `batch` and `origin` directly: events for a batch can arrive before
+    /// `start_batch` returns its id.
     JobStateChanged {
         id: JobId,
         batch: Option<BatchId>,
@@ -212,33 +169,22 @@ pub enum Event {
         id: JobId,
         lines: Vec<LogLine>,
     },
-    /// Every job in the batch has reached a terminal state.
-    ///
-    /// **This precedes the re-probes.** A completed job schedules exactly one
-    /// re-probe of its repository, and those land afterwards as
-    /// `ReposUpserted`. The two are deliberately not merged: the drawer should
-    /// show its summary the moment the work is done rather than waiting on a
-    /// `git status` per repository, and a caller that needs the settled state
-    /// should watch `ReposUpserted` or ask again.
+    /// Every job in the batch has reached a terminal state. Precedes the
+    /// re-probes: each job schedules one, and those land afterwards as
+    /// `ReposUpserted`.
     BatchDone {
         id: BatchId,
         summary: BatchSummary,
     },
-    /// A subscriber fell behind and events were dropped.
-    ///
-    /// Not produced by the actor — the broadcast channel reports it, and
-    /// whoever forwards events turns it into this. It exists because dropping
-    /// events silently leaves a UI showing stale rows forever with no way to
-    /// know: the honest response is to say so and let the consumer re-read the
-    /// snapshot.
+    /// A subscriber fell behind and events were dropped. Not produced by the
+    /// actor: the broadcast channel reports lag, and the forwarder turns it
+    /// into this. A consumer should re-read the snapshot.
     Lagged,
 }
 
 /// Results flowing back from spawned work.
 enum Internal {
-    /// `scan` is `None` for a targeted discovery pass: a repository appearing
-    /// under a watched root is an upsert, not a scan, and reporting progress for
-    /// it would put a bar on screen nobody asked for.
+    /// `scan` is `None` for a targeted discovery pass, not a full scan.
     Found {
         scan: Option<ScanId>,
         found: RepoFound,
@@ -270,35 +216,22 @@ pub struct Config {
     pub extra_env: Vec<(OsString, OsString)>,
     /// When to fetch, without being asked.
     pub fetch: FetchPolicy,
-    /// How often the fetch scheduler looks at the working set.
-    ///
-    /// Not the interval between a repository's fetches — that is
-    /// `FetchPolicy::interval`. This is only how finely the schedule is
-    /// sampled, so it wants to be small against the interval and large against
-    /// nothing in particular.
+    /// How often the fetch scheduler looks at the working set. Not the
+    /// interval between a repository's fetches — that is
+    /// `FetchPolicy::interval`.
     pub fetch_tick: Duration,
     /// Completed background jobs kept before the oldest is evicted.
-    ///
-    /// A process that runs forever needs a ceiling on what it keeps, and a
-    /// fifteen-minute cycle over a hundred repositories is four hundred
-    /// transcripts an hour.
     pub background_history: usize,
     /// How this engine uses the startup cache.
     pub cache: CacheMode,
 }
 
-/// What an engine does with the startup cache.
-///
-/// Three states rather than a bool, because reading and writing are wanted
-/// separately. `git-scylla status` has to *read* the daemon's recorded fetch
-/// health — that is the whole point of answering "why does this say 3 behind"
-/// from a terminal — but it must not *write*, or a one-shot command would
-/// overwrite the application's cache with whatever roots happened to be on its
-/// command line.
+/// What an engine does with the startup cache. Three states because reading
+/// and writing are wanted separately: `git-scylla status` reads the cache but
+/// must never write it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CacheMode {
-    /// Neither read nor written. The mutating verbs, which scan for themselves
-    /// and have no use for a previous run's view.
+    /// Neither read nor written.
     #[default]
     Off,
     /// Served at launch, never written.
@@ -431,11 +364,8 @@ impl EngineHandle {
         self.ask(|reply| Cmd::BackgroundJobs { reply }).await
     }
 
-    /// Scan and wait for it to finish.
-    ///
-    /// Subscribes **before** sending, so a scan that completes immediately —
-    /// an empty root, a cached tree — cannot finish between the two and leave
-    /// the caller waiting for an event that already happened.
+    /// Scan and wait for it to finish. Subscribes before sending, so a scan
+    /// that completes immediately cannot race the subscription.
     pub async fn scan_to_completion(
         &self,
         roots: Vec<PathBuf>,
@@ -459,9 +389,9 @@ impl EngineHandle {
 #[derive(Debug, Clone)]
 pub struct ScanOutcome {
     pub snapshots: Vec<RepoSnapshot>,
-    /// Everything the walk could not read. An empty scan with a non-empty
-    /// `errors` is a configuration or permissions problem, not an empty working
-    /// set, and must never be presented as one.
+    /// Everything the walk could not read. An empty scan with non-empty
+    /// `errors` is a permissions or configuration problem, not an empty
+    /// working set.
     pub errors: Vec<DiscoveryError>,
 }
 
@@ -491,10 +421,8 @@ impl Engine {
     }
 
     /// Stop accepting commands and wait for in-flight work to finish.
-    ///
-    /// In-flight jobs are allowed to complete rather than being abandoned
-    /// mid-`git`: a half-applied pull is worse than a slow exit. Use
-    /// [`EngineHandle::cancel_batch`] first to stop them.
+    /// In-flight jobs run to completion rather than being abandoned
+    /// mid-`git`. Use [`EngineHandle::cancel_batch`] first to stop them.
     pub async fn shutdown(self) {
         let Engine { handle, task } = self;
         let _ = handle.send(Cmd::Shutdown).await;
@@ -507,25 +435,12 @@ struct ScanRun {
     stop: Arc<AtomicBool>,
     walk_done: bool,
     errors: Vec<DiscoveryError>,
-    /// Repositories this scan accepted. Paths that vanished between discovery
-    /// and canonicalization are **not** counted: counting one would leave
-    /// `pending` permanently non-empty and the scan would never settle.
-    ///
-    /// A set for the same reason `pending` is. As a counter it double-counted a
-    /// repository the walk reported twice, while `pending` deduplicated it — so
-    /// the two disagreed and the progress readout claimed more repositories
-    /// than the scan had found.
+    /// Repositories accepted by this scan. A set, not a counter: the walk can
+    /// report a repository more than once.
     accepted: HashSet<RepoId>,
-    /// Accepted but not yet probed.
-    ///
-    /// A set of ids rather than a counter, because a counter cannot be
-    /// attributed. Two concurrent scans incrementing one shared counter each see
-    /// the other's work, and a job's re-probe inflates both — which is how a
-    /// scan reports itself complete while its own rows are still missing.
-    ///
-    /// A re-probe triggered by something else still clears an entry here, and
-    /// that is correct: the scan is waiting for the repository to have been
-    /// read, not for its own subprocess in particular.
+    /// Accepted but not yet probed. A set, not a counter: two concurrent
+    /// scans must not inflate each other's count. Cleared by any re-probe of
+    /// the repository, not only one this scan triggered.
     pending: HashSet<RepoId>,
 }
 
@@ -545,14 +460,9 @@ struct BatchRun {
     outstanding: usize,
 }
 
-/// How far a job got before it reached a terminal state.
-///
-/// Deliberately not the `reprobe: bool` this started as. Two questions hang off
-/// it — does this job still hold its repository, and did anything on disk move
-/// — and they are not the same question: a job cancelled out of the queue
-/// answers no to both, while a job launched that never spawned `git` answers
-/// yes to the first. A bool could only ever say one of them, and the one it did
-/// not say released a repository that a *different* job was running in.
+/// How far a job got before it reached a terminal state. Two independent
+/// facts follow from it: whether the job still holds its repository, and
+/// whether anything on disk may have moved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Settled {
     /// It ran `git`, however that ended.
@@ -580,21 +490,15 @@ struct Actor {
     /// Permits are held here rather than inside the job task, so the actor
     /// releases capacity at a point it controls.
     held: HashMap<JobId, Permits>,
-    /// Who is owed a probe, who has one in flight, and when each last started.
-    ///
-    /// Its own module because the rules are subtle, each of them was a bug
-    /// first, and none of them needs anything the actor owns — see
-    /// [`crate::probe_traffic`].
+    /// Who is owed a probe, who has one in flight, and when each last
+    /// started. See [`crate::probe_traffic`].
     traffic: ProbeTraffic,
 
     /// Is a watcher covering the roots?
     watched: bool,
 
-    /// Has any scan settled yet?
-    ///
-    /// The gate on the whole fetch scheduler. **The initial scan never touches
-    /// the network**, and a launch that fetches eighty repositories at once is
-    /// exactly what the pacing exists to avoid.
+    /// Has any scan settled yet? Gates the fetch scheduler: the initial scan
+    /// never touches the network.
     scan_settled: bool,
     /// Completed background jobs, oldest first, for eviction.
     background_done: VecDeque<JobId>,
@@ -616,11 +520,8 @@ struct Actor {
 }
 
 impl Actor {
-    /// Returns the actor and the receiving half of its internal channel.
-    ///
-    /// Both halves are built here because the sender has to live in the struct,
-    /// and `run` consumes the receiver — so it is handed back rather than
-    /// smuggled through a field nobody else should touch.
+    /// Returns the actor and the receiving half of its internal channel;
+    /// `run` consumes the receiver.
     fn new(
         config: Config,
         probe: Arc<dyn Probe>,
@@ -663,20 +564,12 @@ impl Actor {
         mut internal_rx: mpsc::Receiver<Internal>,
     ) {
         let mut accepting = true;
-        // The cache's clock. Debounced rather than written per change: a batch
-        // of forty pulls produces forty snapshot updates in a second, and
-        // rewriting the file for each is thrash for something nobody reads
-        // until the next launch.
+        // The cache's write clock; writes are debounced, not per-change.
         let mut cache_tick = tokio::time::interval(CACHE_DEBOUNCE);
         cache_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // The fetch scheduler's clock, and the only clock it has: `due` itself
-        // is pure and stateless.
-        //
-        // Never coarser than the interval it is sampling. A repository due
-        // every two seconds cannot be noticed by a scheduler that looks every
-        // thirty, and the failure is silent: the configured interval simply
-        // stops meaning anything. Found by running the daemon with a short
-        // interval and watching nothing happen.
+        // The fetch scheduler's own clock; `due` itself is pure and stateless.
+        // Never coarser than the interval being sampled, or a short interval
+        // silently stops meaning anything.
         let tick =
             self.config.fetch_tick.min(self.config.fetch.interval).max(Duration::from_millis(50));
         let mut fetch_tick = tokio::time::interval(tick);
@@ -684,8 +577,7 @@ impl Actor {
         loop {
             self.pump();
             if !accepting && self.is_quiet() {
-                // Whatever the last work produced still belongs in the cache,
-                // and shutdown is the last chance to write it.
+                // Last chance to write the cache before exit.
                 self.flush_cache();
                 break;
             }
@@ -710,27 +602,20 @@ impl Actor {
     }
 
     fn emit(&self, event: Event) {
-        // An error means nobody is listening, which is normal for the CLI
-        // between batches.
+        // No listener is normal for the CLI between batches.
         let _ = self.events.send(event);
     }
 
     // ---- commands ------------------------------------------------------
 
-    /// Async only because planning asks the probe a ref question.
-    ///
-    /// Every other arm is synchronous and stays that way. Awaiting here does
-    /// stop the actor serving the next command until the plan is resolved — but
-    /// it *yields*, so the probes and jobs on other tasks keep moving, which is
-    /// exactly what a blocking `refs/` walk on this task took away from them.
+    /// Async only because planning asks the probe a ref question. Awaiting
+    /// here yields, so probes and jobs on other tasks keep moving while a
+    /// command blocks.
     async fn on_cmd(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::StartScan { roots, nested, reply } => {
-                // Here rather than at construction, for two reasons: the roots
-                // are what a cache is *for* and only arrive now, and nothing is
-                // subscribed to the event channel until a surface has been
-                // built — cached rows emitted before that would be published to
-                // nobody and the warm launch would show an empty grid.
+                // Roots are only known now, and nothing subscribes before a
+                // surface exists.
                 self.serve_cache(&roots);
                 let id = ScanId(self.next_scan);
                 self.next_scan += 1;
@@ -805,9 +690,7 @@ impl Actor {
 
             Cmd::SetWatched { covered } => {
                 self.watched = covered;
-                // Applied to what is already held, not only to what arrives
-                // next: the coverage claim is about the repositories, and rows
-                // discovered before the watcher started are the same rows.
+                // Applied to already-held snapshots too, not only future ones.
                 let moved: Vec<RepoSnapshot> = self
                     .snapshots
                     .values_mut()
@@ -827,9 +710,7 @@ impl Actor {
             }
 
             Cmd::Select { sel, reply } => {
-                // Sorted for the same reason `Snapshot` is: a `HashMap`'s order
-                // is not one, and a list that reshuffles between two identical
-                // calls is a list nobody can diff.
+                // Sorted: HashMap order is not stable across calls.
                 let mut matched: Vec<&RepoSnapshot> =
                     self.snapshots.values().filter(|s| sel.contains(s)).collect();
                 matched.sort_by(|a, b| a.path.cmp(&b.path));
@@ -885,8 +766,8 @@ impl Actor {
         let cancel = CancellationToken::new();
         let mut job_ids = Vec::new();
 
-        // Skips first, so a caller reading events in order sees the full shape
-        // of the batch before anything starts running.
+        // Skips announced first, so events show the batch's full shape before
+        // anything runs.
         for (repo, why) in &plan.skipped {
             let job_id = self.alloc_job();
             let job = Job::skipped(
@@ -906,11 +787,9 @@ impl Actor {
         for (repo, action) in &plan.eligible {
             let job_id = self.alloc_job();
             let mut job = Job::queued(job_id, Some(id), origin, repo.clone(), action.clone());
-            // Stamped from the snapshot the plan was built against, which the
-            // staleness precondition already guarantees is current. Undoing a
-            // checkout needs the branch it came *from*, and a second
-            // `rev-parse` would be paid on every commit and pull to serve only
-            // this.
+            // From the plan's snapshot, already guaranteed current. Undo
+            // needs the branch a checkout came from; a fresh `rev-parse` here
+            // would cost every commit and pull to serve only that.
             job.branch_before =
                 self.snapshots.get(repo).and_then(|s| s.branch()).map(str::to_string);
             self.enqueue(job, action.is_network());
@@ -940,24 +819,11 @@ impl Actor {
         id
     }
 
-    /// Move repositories that do not have the ref out of a checkout plan.
+    /// Move repositories that lack the given ref out of a checkout plan.
     ///
-    /// The one eligibility question a snapshot cannot answer. A ref list is cold
-    /// data, deliberately off the path that has to finish in under a second for
-    /// a hundred repositories, so it is read here from the filesystem and only
-    /// for the plan that needs it.
-    ///
-    /// Not a subprocess: `git rev-parse` per repository per plan is a cost the
-    /// GUI would pay every time somebody proposes an action. The probe reads
-    /// `refs/` and `packed-refs`, and **declines to answer** for anything
-    /// carrying revision syntax — those are let through to try, because
-    /// refusing a checkout that would have worked is worse than a job that
-    /// fails with a good message.
-    ///
-    /// **Only `Some(false)` skips**, and that is the whole rule. A repository
-    /// the probe could not read is let through for the same reason a revision
-    /// expression is: `RefNotFound` would be a claim about this repository's
-    /// refs, and an unreadable git directory is not evidence for it.
+    /// Only `Some(false)` skips. A ref carrying revision syntax, or a
+    /// repository the probe could not read, is left eligible to try rather
+    /// than refused.
     async fn narrow_to_existing_refs(&self, p: &mut Plan) {
         let Action::Checkout { create: false, ref rev } = p.action else { return };
         let answers = self.ask_refs(p, RefQuery::Exists { rev: rev.clone() }).await;
@@ -972,19 +838,9 @@ impl Actor {
         });
     }
 
-    /// Ask the probe one ref question about every repository still eligible.
-    ///
-    /// **One call for the plan, not one per row.** That is what takes a hundred
-    /// `refs/` walks off this task: the adapter gets the whole batch and hands
-    /// it to a blocking pool in one go, and the actor awaits instead of pinning
-    /// a runtime worker while it reads directories.
-    ///
-    /// Keyed by id on the way back rather than by position. `refine` walks the
-    /// plan again afterwards, and lining two vectors up by index across that
-    /// gap is exactly the bookkeeping that used to drop a repository into
-    /// neither list. An id with no entry — no `found` to read, or an adapter
-    /// that answered short — is one the caller accounts for as a skip, which is
-    /// the safe direction to be wrong in.
+    /// Ask the probe one ref question about every repository still eligible,
+    /// in one call. Answers are keyed by id, not position: a repository with
+    /// no entry is accounted for as a skip by the caller.
     async fn ask_refs(
         &self,
         p: &Plan,
@@ -993,14 +849,11 @@ impl Actor {
         let mut ids = Vec::with_capacity(p.eligible.len());
         let mut reqs = Vec::with_capacity(p.eligible.len());
         for (id, _) in &p.eligible {
-            // No `found` is no git directory to read, which is the same "we do
-            // not know what is in there" every one of these passes already
-            // treats as a skip.
+            // No `found` entry means no git directory to read — treated as a
+            // skip.
             let Some(found) = self.found.get(id) else { continue };
-            // Only `DefaultBranch` reads these, and only that pass has a
-            // snapshot to insist on. Defaulting to empty here keeps the other
-            // two working for a repository that has been found but not yet
-            // probed, which is what they do today.
+            // Only the DefaultBranch pass needs remotes; empty is fine for
+            // the others.
             let remotes = self
                 .snapshots
                 .get(id)
@@ -1009,22 +862,13 @@ impl Actor {
             ids.push(id.clone());
             reqs.push(RefRequest { git_dir: found.git_dir.clone(), remotes });
         }
-        // Cloned so the borrow of `self` ends before the await: the actor owns
-        // every map here, and holding one across a yield point is how the
-        // single-task invariant starts costing more than it buys.
+        // Cloned so the borrow of self ends before the await.
         let probe = Arc::clone(&self.probe);
         ids.into_iter().zip(probe.refs(reqs, query).await).collect()
     }
 
-    /// Rewrite a plan's eligible entries, moving what cannot be resolved to its
-    /// skips.
-    ///
-    /// The three passes around this are all one shape: ask the filesystem one
-    /// question per repository, and either keep the row with a resolved action
-    /// or account for it as a skip. Written out three times, the take-loop-
-    /// reassign was three chances to drop a row into neither list — and a
-    /// repository in neither list is the one thing a plan exists to make
-    /// impossible.
+    /// Rewrite a plan's eligible entries, moving what cannot be resolved to
+    /// its skips. Shared by the three resolution passes below.
     fn refine(
         &self,
         p: &mut Plan,
@@ -1042,17 +886,9 @@ impl Actor {
 
     /// Give every repository in a sync plan its own default branch.
     ///
-    /// The second eligibility question a snapshot cannot answer, and the reason
-    /// `Action::SyncDefault` carries an `Option` rather than a branch name:
-    /// `main` versus `master` is not uniform across a working set, and the
-    /// branch has to come from `refs/` — cold data, off the path that probes a
-    /// hundred repositories in under a second.
-    ///
-    /// The rest of the resolution rides along because this is the one place
-    /// that has both halves in hand: the snapshot says which branch to come
-    /// back to and whether anything is in the way, the filesystem says where to
-    /// go. Splitting them would mean a partially-resolved action existing in
-    /// between, which is what the `Option` exists to forbid.
+    /// The branch has to come from `refs/` — cold data, read once per plan
+    /// rather than once per row — since `main` versus `master` is not uniform
+    /// across a working set.
     async fn resolve_default_branches(&self, p: &mut Plan) {
         let Action::SyncDefault { mode, .. } = p.action else { return };
         let answers = self.ask_refs(p, RefQuery::DefaultBranch).await;
@@ -1062,82 +898,50 @@ impl Actor {
             };
             let default = match answers.get(id) {
                 Some(Ok(RefAnswer::DefaultBranch(Some(name)))) => name.clone(),
-                // A real answer of "no trunk I can name".
+                // A definite answer: this repository has no trunk.
                 Some(Ok(RefAnswer::DefaultBranch(None))) => {
                     return Err(SkipReason::NoDefaultBranch)
                 }
-                // Unreadable, or no answer at all. **Not** `NoDefaultBranch`:
-                // this repository may well have one, and a plan that says it
-                // does not is a false sentence the user is about to act on.
+                // Unreadable or no answer. Not `NoDefaultBranch`: this
+                // repository may still have one.
                 _ => return Err(SkipReason::SnapshotStale),
             };
-            // The precondition already refused a detached HEAD, which is the
-            // case with no branch to come back to.
+            // The precondition already refused a detached HEAD.
             let Some(back_to) = snap.branch().map(str::to_string) else {
                 return Err(SkipReason::DetachedHead);
             };
-            // Standing on the default branch already, with work in the tree.
-            //
-            // There is no switch to make, so the stash has nothing to clear out
-            // of the way — and stashing purely so a pull can run on a dirty tree
-            // is `git pull --autostash` under another name, which is refused
-            // everywhere else. `Pull`'s own precondition is inherited rather
-            // than restated: with no switch, this *is* a pull.
-            //
-            // Found by running it, not by reading it. The pop is otherwise
-            // incapable of conflicting — it goes back onto the same tree it came
-            // from, because the branch it was taken on never moved — and this is
-            // the one arrangement where it does not. The symptom was a sync that
-            // left conflict markers in a tracked file and reported `ok`.
+            // Already on the default branch with a dirty tree: there is no
+            // switch to make, so this is a plain pull on a dirty tree,
+            // refused like any other.
             if default == back_to && !snap.is_clean() {
                 return Err(SkipReason::DirtyWorktree);
             }
             let plan = git_scylla_core::SyncPlan {
                 default,
                 back_to,
-                // Tracked work only. Untracked files are left where they are:
-                // they rarely block a switch, and sweeping a build directory
-                // into a stash entry to survive a fast-forward is a trade
-                // nobody asked for.
+                // Tracked work only; untracked files are left in place.
                 stash: snap.work.staged > 0 || snap.work.modified > 0,
             };
             Ok(Action::SyncDefault { mode, plan: Some(plan) })
         });
     }
 
-    /// Give every repository in a tag plan the name derived from *its* tags.
-    ///
-    /// The third question a snapshot cannot answer. The plan must read "create
-    /// `v2.4.0-dev.3`" per repository, because "create the next dev tag" is not
-    /// something a user can check before confirming it forty times.
-    ///
-    /// The arithmetic is pure; this only supplies the tag list, read from
-    /// `refs/` once per plan rather than once per row.
-    ///
-    /// **The tag list is the local one**, and that is worth being plain about:
-    /// nothing here fetches, so a repository whose tags are behind the remote
-    /// derives a name somebody else may already have taken. That failure is
-    /// safe by construction rather than by luck — the steps publish before
-    /// creating anything locally, and a name already on the remote is rejected
-    /// with `(already exists)` — but it is a real failure, and
-    /// `FailureKind::TagExists` is what tells the user to fetch tags and try
-    /// again.
+    /// Give every repository in a tag plan the name derived from *its* local
+    /// tags, read from `refs/` once per plan. The list is local: nothing here
+    /// fetches, so a derived name may already exist on the remote.
     async fn resolve_tag_names(&self, p: &mut Plan) {
         let Action::DevTag { ref channel, bump, ref push, .. } = p.action else { return };
         let (channel, template_push) = (channel.clone(), push.clone());
         let answers = self.ask_refs(p, RefQuery::Tags).await;
         self.refine(p, |_, id, action| {
-            // The remote is already resolved per repository by `plan::resolve`;
-            // only the name is missing, so the resolved action's own `push` is
-            // the one to keep.
+            // The remote is already resolved by plan::resolve; only the name
+            // is missing.
             let push = match action {
                 Action::DevTag { push, .. } => push,
                 _ => template_push.clone(),
             };
-            // A repository that could not be read is skipped rather than
-            // treated as having no tags. The difference is not cosmetic: an
-            // empty list derives `dev.1`, so the plan would offer to cut a name
-            // this repository may well have used already.
+            // Unreadable is skipped, not treated as "no tags" — an empty
+            // list would derive a name already in use.
             let Some(Ok(RefAnswer::Tags(have))) = answers.get(id) else {
                 return Err(SkipReason::SnapshotStale);
             };
@@ -1151,9 +955,7 @@ impl Actor {
         let Some(run) = self.batches.get(&batch) else {
             return empty_undo();
         };
-        // **Never undo an undo.** One level, explicit, recent: a stack would
-        // need a history the tool deliberately does not keep, and a second undo
-        // of the same work is a `reset --hard` whose target nobody chose.
+        // Never undo an undo — one level only.
         if run.batch.undoes.is_some() {
             return empty_undo();
         }
@@ -1167,20 +969,15 @@ impl Actor {
         crate::plan::undo(&jobs, &snaps, SystemTime::now(), &self.config.policy)
     }
 
-    /// Start a background fetch of everything whose slot has come round.
-    ///
-    /// **The scheduler proposes; the engine disposes.** `due` is pure and holds
-    /// no state, so everything it cannot know is decided here — and a repository
-    /// dropped for any of those reasons is a *skipped tick*, not a failed fetch.
-    /// Recording a failure would push a healthy repository toward quarantine for
-    /// being busy.
+    /// Start a background fetch of everything whose slot has come round. A
+    /// repository dropped here is a skipped tick, not a failed fetch —
+    /// recording a failure would push a healthy repository toward quarantine
+    /// for being busy.
     fn fetch_due(&mut self) {
         if !self.scan_settled || !self.config.fetch.enabled {
             return;
         }
-        // Suspended while the user is running something. Their batch has the
-        // permits and the priority; adding background network work to it is how
-        // a fetch cycle becomes something the user can feel.
+        // Suspended while a user batch is running.
         if self.user_batch_in_flight() {
             return;
         }
@@ -1207,11 +1004,9 @@ impl Actor {
         self.jobs.values().any(|j| j.repo == *repo && !j.state.is_terminal())
     }
 
-    /// One fetch, with no batch and no plan sheet.
-    ///
-    /// The only action allowed to skip the plan-confirm flow, and the exemption
-    /// is closed to it: `Fetch` cannot touch a worktree, move `HEAD` or create
-    /// local history. Nothing else inherits this by analogy.
+    /// One fetch, with no batch and no plan sheet. `Fetch` is the only
+    /// action exempt from the plan-confirm flow: it cannot touch a worktree,
+    /// move `HEAD`, or create local history.
     fn start_background_fetch(&mut self, repo: RepoId) {
         const ACTION: Action = Action::Fetch { prune: true, tags: false };
         let id = self.alloc_job();
@@ -1220,11 +1015,8 @@ impl Actor {
     }
 
     /// Tell everyone a job exists, in whatever state it was created in.
-    ///
-    /// Announced on creation and not on first run. Without this a queued job is
-    /// invisible until it starts, and a drawer showing a batch of forty would
-    /// fill in from nothing as the scheduler let jobs through — which is
-    /// exactly the state the user wants to see.
+    /// Announced on creation, not on first run, so a queued job is visible
+    /// before the scheduler admits it.
     fn announce(&self, job: &Job) {
         self.emit(Event::JobStateChanged {
             id: job.id,
@@ -1236,11 +1028,8 @@ impl Actor {
     }
 
     /// Announce a runnable job, record it, and hand it to the scheduler.
-    ///
-    /// One shape for a user batch's jobs and for a background fetch, because
-    /// the three steps are not independent: a job in `self.jobs` that never
-    /// reached the scheduler never runs, and one the scheduler holds but
-    /// nothing announced is a row that appears out of nowhere when it finishes.
+    /// Shared by user batches and background fetches; the three steps must
+    /// stay together.
     fn enqueue(&mut self, job: Job, network: bool) {
         self.announce(&job);
         let ticket = Ticket {
@@ -1254,11 +1043,8 @@ impl Actor {
         self.sched.enqueue(ticket);
     }
 
-    /// Record what a finished fetch did to a repository's schedule.
-    ///
-    /// A **user** fetch is the reset button: it clears backoff and quarantine
-    /// whatever the outcome, because the user asking is the only thing that
-    /// restarts a quarantined repository.
+    /// Record what a finished fetch did to a repository's schedule. A user
+    /// fetch clears backoff and quarantine regardless of outcome.
     fn record_fetch(&mut self, job: &Job) {
         if !matches!(job.action, Action::Fetch { .. }) {
             return;
@@ -1267,7 +1053,7 @@ impl Actor {
             JobState::Ok => Attempt::Ok,
             JobState::Failed { .. } => Attempt::Failed(first_error(job)),
             // Cancelled or skipped: nothing was attempted, so nothing is
-            // recorded. A dropped attempt must not count toward backoff.
+            // recorded.
             _ => return,
         };
         let Some(snap) = self.snapshots.get(&job.repo) else { return };
@@ -1286,11 +1072,8 @@ impl Actor {
         }
     }
 
-    /// Keep the newest `background_history` background transcripts.
-    ///
-    /// Unbounded retention is fine for a session of user batches and is not
-    /// fine for a process that fetches a hundred repositories every fifteen
-    /// minutes for a week.
+    /// Keep the newest `background_history` background transcripts, evicting
+    /// the oldest.
     fn evict_background(&mut self, id: JobId) {
         self.background_done.push_back(id);
         while self.background_done.len() > self.config.background_history {
@@ -1300,17 +1083,10 @@ impl Actor {
         }
     }
 
-    /// Publish what a previous run knew, once, before the scan starts.
-    ///
-    /// The rows are stale by construction: each carries the `probed_at` of the
-    /// run that wrote it, so `RepoSnapshot::is_stale` is true and the
-    /// `SnapshotStale` precondition refuses every action on them until the scan
-    /// replaces them. That is the whole safety argument for showing cached data
-    /// at all — it is visible, and it is unusable.
-    ///
-    /// `found` is deliberately **not** seeded. A cached snapshot is something to
-    /// look at, not something to run against, and the entry that would let a job
-    /// launch belongs to the scan that confirms the repository still exists.
+    /// Publish what a previous run knew, once, before the scan starts. Rows
+    /// are stale by construction, so `SnapshotStale` refuses every action on
+    /// them until the scan replaces them. `found` is not seeded: a cached
+    /// snapshot is visible but not runnable until the scan confirms it.
     fn serve_cache(&mut self, roots: &[PathBuf]) {
         self.cache_roots = roots.to_vec();
         if self.config.cache == CacheMode::Off || self.cache_served {
@@ -1323,9 +1099,8 @@ impl Actor {
         }
         let mut repos = cache.repos;
         for snap in &mut repos {
-            // Marked at the door rather than inferred from age downstream: a
-            // cache written five seconds ago still describes a repository that
-            // nothing watched while the application was closed.
+            // Marked explicitly; a cache written moments ago is still
+            // unwatched.
             snap.from_cache = true;
             self.from_cache.insert(snap.id.clone());
             self.snapshots.insert(snap.id.clone(), snap.clone());
@@ -1334,11 +1109,9 @@ impl Actor {
         self.emit(Event::ReposUpserted(repos));
     }
 
-    /// Write the cache, if anything has moved since the last write.
-    ///
-    /// Called from a timer rather than on every change: a batch of forty pulls
-    /// produces forty snapshot updates in a second, and rewriting the file for
-    /// each is disk thrash for a file nobody reads until the next launch.
+    /// Write the cache, if anything has moved since the last write. Called
+    /// from a timer, not on every change, to avoid rewriting on every
+    /// snapshot update.
     fn flush_cache(&mut self) {
         if self.config.cache != CacheMode::ReadWrite
             || !self.cache_dirty
@@ -1347,35 +1120,27 @@ impl Actor {
             return;
         }
         self.cache_dirty = false;
-        // Nothing still owed a first probe: a cached row that the scan has not
-        // yet confirmed would otherwise be written back out as though this run
-        // had seen it, and it would then survive a working set it is no longer
-        // part of.
+        // Excludes rows the scan has not yet confirmed.
         let repos: Vec<RepoSnapshot> =
             self.snapshots.values().filter(|s| !self.from_cache.contains(&s.id)).cloned().collect();
         if let Err(e) =
             git_scylla_store::Cache::new(self.cache_roots.clone(), repos, SystemTime::now()).save()
         {
-            // A cache that cannot be written costs a slower launch and nothing
-            // else, so it is a warning rather than anything a caller hears.
+            // Costs a slower next launch, nothing else — a warning, not an
+            // error a caller hears.
             tracing::warn!(%e, "could not write the startup cache");
         }
     }
 
-    /// Act on what a watcher saw.
-    ///
-    /// **The watcher proposes; the engine disposes** — the same rule the fetch
-    /// scheduler follows. Every path here goes through `request_probe`, which
-    /// honours the busy marker, so a watcher cannot re-probe a repository
-    /// underneath a running job however many events it saw.
+    /// Act on what a watcher saw. Every path goes through `request_probe`,
+    /// which honours the busy marker: a watcher cannot re-probe a repository
+    /// underneath a running job.
     fn on_invalidation(&mut self, what: git_scylla_watch::Invalidation) {
         use git_scylla_watch::Invalidation;
         match what {
             Invalidation::Repos(ids) => {
                 for id in ids {
-                    // Silently ignored for a repository the engine does not
-                    // hold: the watcher's index is rebuilt on scan completion
-                    // and can briefly name one this actor has already dropped.
+                    // Ignored for a repository the engine no longer holds.
                     if self.found.contains_key(&id) {
                         self.traffic.note(&id, Why::Observed);
                     }
@@ -1384,11 +1149,8 @@ impl Actor {
             Invalidation::Gone(ids) => self.remove_repos(ids),
             Invalidation::Discover(path) => self.discover(path),
             Invalidation::Rescan => {
-                // Nothing local can be trusted, and the engine does not keep
-                // the roots — a scan is told them. Re-walking what it already
-                // holds is the closest it can get on its own, and it is enough:
-                // a repository that appeared while history was lost is found by
-                // the `Discover` path or by the user's Refresh.
+                // The engine does not keep the scan roots; re-walking what
+                // it already holds is the closest it can get on its own.
                 let roots: Vec<PathBuf> = self.found.values().map(|f| f.path.clone()).collect();
                 for root in roots {
                     self.discover(root);
@@ -1397,19 +1159,14 @@ impl Actor {
         }
     }
 
-    /// Drop repositories that are no longer on disk.
-    ///
-    /// The only thing in the engine that shrinks a map. A row for a directory
-    /// the user deleted is worse than no row, because every action offered on
-    /// it will fail — and `found` has to go too, or a queued job would still
-    /// have somewhere to run.
+    /// Drop repositories that are no longer on disk. Removes from both
+    /// `snapshots` and `found` — a queued job must have nowhere to run.
     fn remove_repos(&mut self, ids: Vec<RepoId>) {
         let removed: Vec<RepoId> = ids
             .into_iter()
             .filter(|id| {
-                // A repository with a job in flight is left alone: the job is
-                // about to fail on its own and report why, which is a better
-                // account than a row vanishing mid-batch.
+                // A repository with a job in flight is left alone; the job
+                // reports its own failure.
                 let busy = self.sched.is_busy(id);
                 if !busy {
                     self.snapshots.remove(id);
@@ -1425,12 +1182,9 @@ impl Actor {
         }
     }
 
-    /// Walk one subtree and upsert whatever it finds.
-    ///
-    /// No `ScanRun`, so no progress and no `ScanDone`: cloning a repository
-    /// should make it appear, not put a scan on screen. Nested is forced on,
-    /// because the subtree being discovered is usually the repository itself
-    /// and its own root would otherwise prune it.
+    /// Walk one subtree and upsert whatever it finds. No `ScanRun`: this
+    /// should make a repository appear, not put a scan on screen. Nested is
+    /// forced on, since the subtree is usually the repository's own root.
     fn discover(&mut self, path: PathBuf) {
         let walker = Walker::new(vec![path])
             .options(WalkOptions { nested: self.config.nested, max_depth: self.config.max_depth });
@@ -1448,24 +1202,17 @@ impl Actor {
         });
     }
 
-    /// Every snapshot, ordered by path.
-    ///
-    /// **Ordered, always.** `snapshots` is a `HashMap`, so anything reading it
-    /// directly gets a different order every time — and a plan whose eligible
-    /// and skipped lists reshuffle between two identical runs is a plan nobody
-    /// trusts. `Plan` once read the map directly, which is how a plan sheet
-    /// could list the same twenty repositories in a different order each time it
-    /// was opened.
+    /// Every snapshot, ordered by path. `snapshots` is a `HashMap`; anything
+    /// reading it directly gets a different order each time.
     fn sorted_snapshots(&self) -> Vec<RepoSnapshot> {
         let mut snaps: Vec<RepoSnapshot> = self.snapshots.values().cloned().collect();
         snaps.sort_by(|a, b| a.path.cmp(&b.path));
         snaps
     }
 
-    /// Which host this repository's network work contends for.
-    ///
-    /// The upstream's remote if there is one, else `origin`, else the first.
-    /// Inexact by design: a concurrency bucket, never a correctness input.
+    /// Which host this repository's network work contends for: the
+    /// upstream's remote if there is one, else `origin`, else the first. A
+    /// concurrency bucket, not a correctness input.
     fn host_of(&self, repo: &RepoId) -> Option<String> {
         let snap = self.snapshots.get(repo)?;
         let preferred = snap.upstream.as_ref().map(|u| u.remote.as_str()).unwrap_or("origin");
@@ -1500,10 +1247,8 @@ impl Actor {
     fn pump(&mut self) {
         for launch in self.sched.launchable() {
             let Some(job) = self.jobs.get(&launch.job) else {
-                // No job record for a scheduled ticket. Unreachable today —
-                // nothing removes from `self.jobs` — but the busy marker was set
-                // inside `launchable`, so failing to hand it back would leave the
-                // repository busy forever and the engine never idle.
+                // Unreachable in practice, but the busy marker was set
+                // inside `launchable` and must be released regardless.
                 self.sched.finished(&launch.repo);
                 continue;
             };
@@ -1536,14 +1281,10 @@ impl Actor {
             });
         }
 
-        // Everything owed a probe that may start now. One call: what is owed,
-        // in what order, and how long a watcher's report has to wait are all
-        // decided in `probe_traffic`, and none of it needs anything here.
-        //
-        // `can_start` answers for every reason this loop could fail to act, not
-        // only for a job holding the repository — a repository handed back has
-        // been marked as probing, so one that cannot be spawned would stay
-        // marked and the engine would never be idle again.
+        // Everything owed a probe that may start now, decided by
+        // `probe_traffic`. `can_start` must cover every reason a probe could
+        // fail to spawn: a repository handed back is marked probing, and must
+        // actually start or the engine is never idle again.
         let can_start = |r: &RepoId| !self.sched.is_busy(r) && self.found.contains_key(r);
         for repo in self.traffic.take_ready(Instant::now(), can_start) {
             self.spawn_probe(&repo);
@@ -1551,36 +1292,24 @@ impl Actor {
     }
 
     /// Ask for a probe because something is known to have changed.
-    ///
-    /// Remembered rather than run: it is started by the next `pump`, which the
-    /// run loop reaches before it waits again. Collapses with any other request
-    /// for the same repository, so a pull that writes a thousand files still
-    /// costs exactly one re-probe.
+    /// Remembered, not run immediately — started by the next `pump`.
+    /// Collapses with any other pending request for the same repository.
     fn request_probe(&mut self, repo: &RepoId) {
-        // Nothing is owed to a repository this actor does not hold, and noting
-        // one would keep the engine from ever being idle: what is owed is never
-        // dropped, only deferred. `Cmd::RefreshRepo` carries whatever id a
-        // surface sends, which need not name anything that was discovered.
-        //
-        // The watcher's path guards the same way, for its own reason — see
-        // `on_invalidation`.
+        // A repository this actor does not hold is never owed a probe: what
+        // is owed is deferred, never dropped, and would keep the engine from
+        // ever being idle.
         if !self.found.contains_key(repo) {
             return;
         }
         self.traffic.note(repo, Why::Definite);
     }
 
-    /// Start a probe that [`ProbeTraffic::take_ready`] has already admitted.
-    ///
-    /// The bookkeeping is done: the repository is marked as probing and the
-    /// requests owed to it are cleared. This only has to spawn.
+    /// Start a probe that [`ProbeTraffic::take_ready`] has already admitted
+    /// and marked as probing. This only has to spawn.
     fn spawn_probe(&mut self, repo: &RepoId) {
         let Some(found) = self.found.get(repo).cloned() else {
-            // Unreachable — `can_start` checked exactly this, and nothing runs
-            // between it and here. Handed back rather than dropped anyway: the
-            // probing marker is set, and failing to release it would leave the
-            // engine permanently un-idle, the same way `pump` hands a ticket
-            // back to the scheduler above.
+            // Unreachable in practice; the probing marker must still be
+            // released.
             self.traffic.finished(repo);
             return;
         };
@@ -1600,11 +1329,9 @@ impl Actor {
     async fn on_internal(&mut self, msg: Internal) {
         match msg {
             Internal::Found { scan, found } => {
-                // The id comes from discovery and is never re-derived here.
-                // Canonicalizing again could disagree with what the probe will
-                // report — a path can vanish in between — and the mismatch would
-                // leave `pending` permanently non-empty, so the scan would never
-                // settle and `shutdown` would never return.
+                // The id is never re-derived: re-canonicalizing could
+                // disagree with what the probe reports, leaving `pending`
+                // permanently non-empty.
                 let id = found.id.clone();
                 self.found.insert(id.clone(), found);
                 if let Some(run) = scan.and_then(|s| self.scans.get_mut(&s)) {
@@ -1618,9 +1345,7 @@ impl Actor {
             }
 
             Internal::WalkFinished { scan, errors } => {
-                // Logged at debug, not warn: the errors are now returned to
-                // the caller through `ScanDone`, and whoever presents them
-                // should not have to compete with a duplicate on stderr.
+                // Debug, not warn: the caller gets these through `ScanDone`.
                 for e in &errors {
                     tracing::debug!(error = %e, "discovery");
                 }
@@ -1685,21 +1410,15 @@ impl Actor {
         // visible to the very next pump.
         self.held.remove(&id);
         match settled {
-            // Ran `git`, so the repository may have moved: release it and
-            // re-read it, exactly once.
+            // Ran `git`: the repository may have moved, so re-read it once.
             Settled::Ran => {
                 self.sched.finished(repo);
                 self.request_probe(repo);
             }
-            // Took its repository but never spawned `git`. Release it; nothing
-            // on disk moved, so a re-probe would be pure cost.
+            // Took its repository but never spawned `git`: nothing on disk
+            // moved, so skip the re-probe.
             Settled::NotStarted => self.sched.finished(repo),
-            // Cancelled out of the queue, so it never held its repository —
-            // the busy marker is set inside `Scheduler::launchable` and
-            // nowhere else. Handing back a marker that belongs to a *different*
-            // job would free the repository out from under it, and two `git`
-            // processes in one repository is the failure the marker exists to
-            // prevent.
+            // Never held its repository; nothing to release.
             Settled::NeverLaunched => {}
         }
         if let Some(batch_id) = self.jobs.get(&id).and_then(|j| j.batch) {
@@ -1742,21 +1461,16 @@ impl Actor {
         }
     }
 
-    /// A scan is done when its walk has finished and every repository **it**
-    /// accepted has been probed.
-    ///
-    /// Deliberately not gated on the global set of in-flight probes: an
-    /// unrelated re-probe from a running batch has nothing to do with whether
-    /// this scan has finished reading the repositories it found.
+    /// A scan is done when its walk has finished and every repository it
+    /// accepted has been probed. Not gated on in-flight probes globally: an
+    /// unrelated re-probe has nothing to do with this scan's own completion.
     fn settle_scans(&mut self) {
         let done: Vec<ScanId> =
             self.scans.iter().filter(|(_, r)| r.settled()).map(|(id, _)| *id).collect();
         for id in done {
             let errors = self.scans.remove(&id).map(|r| r.errors).unwrap_or_default();
-            // **After** the scan, not before. A cached row the walk did not
-            // reach is only known to be gone once the walk has finished;
-            // dropping it earlier would blank rows about to be confirmed, which
-            // is the flicker the cache exists to remove.
+            // After the scan, not before: a cached row is only known gone
+            // once the walk finished.
             if !self.from_cache.is_empty() {
                 let unconfirmed: Vec<RepoId> =
                     std::mem::take(&mut self.from_cache).into_iter().collect();
@@ -1769,36 +1483,24 @@ impl Actor {
     }
 }
 
-/// Keep the engine's fetch bookkeeping across a re-probe.
-///
-/// `FetchHealth` is engine-maintained, not probed — but the probe has to put
-/// *something* there, and what it puts is "due now". Letting that win would
-/// reset backoff and un-quarantine a broken remote on every re-probe, which with
-/// a watcher running is every time a file changes: the quarantine would never
-/// survive long enough to stop anything.
-///
-/// The probe's value is taken in exactly one case, because it is the one the
-/// probe genuinely knows better: a repository whose remotes have gone has
-/// nothing to fetch from, and `Disabled` is not a schedule the engine can
-/// derive from a schedule.
+/// Keep the engine's fetch bookkeeping across a re-probe. `FetchHealth` is
+/// engine-maintained, not probed; the probe's freshly-derived "due now"
+/// would otherwise reset backoff and quarantine on every re-probe. The
+/// probe's value wins only when it reports `Disabled` — no remotes to fetch
+/// from, which the engine cannot derive on its own.
 fn carried_health(previous: Option<&RepoSnapshot>, probed: FetchHealth) -> FetchHealth {
     if probed.schedule == FetchSchedule::Disabled {
         return probed;
     }
     match previous {
-        // ...and the converse: a repository that had no remote and now has one
-        // takes the probe's fresh "due now".
+        // A repository that gained a remote takes the probe's fresh schedule.
         Some(prev) if prev.fetch.schedule != FetchSchedule::Disabled => prev.fetch.clone(),
         _ => probed,
     }
 }
 
-/// The first line git wrote to stderr, which is almost always the `fatal:` that
-/// explains the failure.
-///
-/// First and not last: a fetch that fails on authentication says so up front and
-/// then prints a hint about configuring credentials, and the hint is not the
-/// reason.
+/// The first line git wrote to stderr — almost always the `fatal:` that
+/// explains the failure, not a trailing hint.
 fn first_error(job: &Job) -> &str {
     job.log
         .iter()
@@ -1807,11 +1509,8 @@ fn first_error(job: &Job) -> &str {
         .unwrap_or("the fetch failed with no output")
 }
 
-/// An undo plan with nothing in it.
-///
-/// Returned for a batch the engine has forgotten and for one that is itself an
-/// undo. Not a failure, and it does not need to be: `PlanView` renders "nothing
-/// to do" and offers no confirm control, which is the right answer to both.
+/// An undo plan with nothing in it. Returned for a batch the engine has
+/// forgotten, and for one that is itself an undo.
 fn empty_undo() -> Plan {
     Plan {
         action: Action::Reset {
