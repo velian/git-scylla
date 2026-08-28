@@ -8,43 +8,30 @@ use tokio::sync::mpsc::UnboundedSender;
 /// One discovered repository, emitted as it is found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoFound {
-    /// The repository's identity, resolved **here and only here**.
-    ///
-    /// Every consumer takes this rather than re-deriving it. Not just tidiness:
-    /// canonicalizing the same path twice at different moments can give two
-    /// different answers if the path vanishes in between, and two answers for
-    /// one repository means a map keyed on the first is never cleared by the
-    /// second. The engine's scan bookkeeping hit exactly that.
+    /// The repository's identity, resolved here and nowhere else: canonicalizing
+    /// the same path twice can give two different answers if it vanishes in
+    /// between.
     pub id: RepoId,
     /// The repository's worktree root, or the repository itself when bare.
     pub path: PathBuf,
     pub kind: RepoKind,
-    /// The resolved git directory. Discovery has already read the `.git` file
-    /// for linked worktrees and submodules, so the probe — which needs it for
-    /// in-progress detection and the config read — should not have to again.
+    /// The resolved git directory, already following the `.git` file for
+    /// linked worktrees and submodules.
     pub git_dir: PathBuf,
 }
 
-/// Something the walk could not read.
-///
-/// Reported to the caller rather than only logged, because on macOS this is
-/// almost always TCC: an unsigned app scanning `~/Documents` gets permission
-/// denied per directory and finds nothing, which is indistinguishable from an
-/// empty working set unless somebody says so. That message is the highest-value
-/// error in the application, and it cannot be written without this.
+/// Something the walk could not read. On macOS this is almost always TCC: an
+/// unsigned app scanning `~/Documents` gets permission denied per directory,
+/// indistinguishable from an empty tree unless reported.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(tag = "type", content = "value")]
 pub enum DiscoveryError {
     #[error("root {0} does not exist or is not readable")]
     UnusableRoot(PathBuf),
-    /// A directory inside a root that could not be read. The walk continues.
     #[error("could not read {path}: {reason}")]
     Unreadable { path: PathBuf, reason: String },
     /// How many further unreadable directories were not listed.
-    ///
-    /// A tree the user has no access to produces one of these per directory,
-    /// and a UI does not need ten thousand of them to say "grant access".
     #[error("and {0} more unreadable")]
     MoreUnreadable(usize),
 }
@@ -70,11 +57,8 @@ pub struct Walker {
 #[derive(Default)]
 struct Found {
     /// Repository roots discovered so far, used to prune their subtrees.
-    ///
-    /// A `Vec` scanned by ancestor comparison rather than a set: pruning asks
-    /// "is any ancestor of this path a repository", which is a prefix question,
-    /// and at fewer than a hundred repositories a linear scan of ancestors
-    /// against a small vector is faster than hashing the path.
+    /// Pruning is an ancestor-prefix question, so a linear scan over this
+    /// `Vec` beats hashing the path at the scale this runs at.
     roots: Vec<PathBuf>,
 }
 
@@ -92,23 +76,17 @@ impl Walker {
         self
     }
 
-    /// A flag that abandons the walk when set.
-    ///
-    /// The walk is blocking filesystem work, so it cannot be cancelled by
-    /// dropping a future. Checked per directory entry, which is fine-grained
-    /// enough: the cost of the check is a relaxed atomic load against a `stat`.
-    /// Needed because a root chosen by accident — `/`, a network mount — must be
-    /// abandonable rather than something the user waits out.
+    /// A flag that abandons the walk when set. The walk is blocking, so it
+    /// cannot be cancelled by dropping a future; this is checked once per
+    /// directory entry instead.
     pub fn cancel_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.stop)
     }
 
-    /// Walk every root, sending each repository as it is found.
-    ///
-    /// Blocking: run it on a dedicated thread. Returns the count sent, and the
-    /// roots that could not be walked at all — a root that does not exist is a
-    /// configuration error worth reporting, while an unreadable directory
-    /// *inside* a root is a warning that must not abort the walk.
+    /// Walk every root, sending each repository as it is found. Blocking: run
+    /// it on a dedicated thread. Returns the count sent, and the roots that
+    /// could not be walked at all — a nonexistent root is fatal, an
+    /// unreadable directory inside a root is not.
     pub fn walk(&self, tx: UnboundedSender<RepoFound>) -> (usize, Vec<DiscoveryError>) {
         let mut fatal = Vec::new();
         let mut usable = Vec::new();
@@ -121,25 +99,18 @@ impl Walker {
         if usable.is_empty() {
             return (0, fatal);
         }
-        // Two roots naming one directory are one root. Deduplicated here so
-        // that nothing downstream has to cope with a repository arriving twice.
+        // Two roots naming one directory are one root.
         usable.sort();
         usable.dedup();
 
         let found = Arc::new(Mutex::new(Found::default()));
         let count = Arc::new(Mutex::new(0usize));
 
-        // Roots are classified here rather than in the filter below, because
-        // `ignore` never calls `filter_entry` for a depth-0 entry — it yields
-        // the root and only filters what is under it. So a root that is itself
-        // a repository was never looked at, and `git-scylla scan ~/one-repo`
-        // answered "no repositories found": the same sentence an empty
-        // directory gets.
-        //
-        // Doing it before the walk starts, rather than from the iterator body,
-        // also keeps the prune decision independent of when entries are yielded
-        // relative to when they are filtered: `Found::roots` already holds every
-        // root by the time the first child is filtered, so a root repository's
+        // Classified here, not in the filter below: `ignore` never calls
+        // `filter_entry` for a depth-0 entry, so a root that is itself a
+        // repository would otherwise never be looked at. Doing it before the
+        // walk starts also means `Found::roots` already holds every root by
+        // the time the first child is filtered, so a root repository's
         // subtree prunes through the same ancestor check as everyone else's.
         for root in &usable {
             if excluded(root, &usable) {
@@ -156,18 +127,15 @@ impl Walker {
             builder.add(r);
         }
         builder
-            // A raw walk. Gitignore semantics would be actively wrong: the
-            // repository we want is frequently inside an ignored directory.
+            // Gitignore semantics would be wrong here: the repository we
+            // want is frequently inside an ignored directory.
             .standard_filters(false)
             .hidden(false)
             .parents(false)
-            // Never follow symlinks: it is the only defence against a symlink
-            // loop in the scan root, and it costs nothing we want.
+            // The only defence against a symlink loop in the scan root.
             .follow_links(false)
             .max_depth(self.opts.max_depth)
-            // Serial. Discovery is not the bottleneck, and a deterministic
-            // depth-first order makes prune-on-match a local decision rather
-            // than a race.
+            // Serial and depth-first, so prune-on-match is a local decision.
             .threads(1);
 
         let roots_for_skip = usable.clone();
@@ -177,18 +145,14 @@ impl Walker {
         let c = Arc::clone(&count);
         let sender = tx.clone();
 
-        // All the real work happens in the filter, not in the iterator body.
-        // `ignore` only lets us prevent descent from here, and doing detection
-        // here too means the prune decision for a child is always made after
-        // its parent has been classified — no reliance on when entries are
-        // yielded relative to when they are filtered.
+        // Classification and pruning happen in the filter itself: `ignore`
+        // only lets us prevent descent from here, so a child's prune decision
+        // is always made after its parent has been classified.
         builder.filter_entry(move |entry| {
             if stop.load(Ordering::Relaxed) {
                 return false;
             }
             let path = entry.path();
-            // Files are never interesting: we look only for directories, and
-            // declining them here also spares the caller a yield per file.
             if !entry.file_type().is_some_and(|t| t.is_dir()) {
                 return false;
             }
@@ -200,20 +164,14 @@ impl Walker {
                 return false;
             }
             accept(path, &f, &c, &sender);
-            // Yield it either way so `ignore` descends once more; if it was a
-            // repository, every child is then rejected by the ancestor check
-            // above. One extra directory listing per repository, which at this
-            // scale is cheaper than the bookkeeping to avoid it.
+            // Yielded either way: if it was a repository, every child is then
+            // rejected by the ancestor check above.
             true
         });
 
         let mut unreadable = 0usize;
         for result in builder.build() {
             if let Err(err) = result {
-                // A directory we cannot read never ends the walk: one locked
-                // folder must not cost the user every repository below its
-                // siblings. But it is reported, because a scan that silently
-                // finds nothing is the worst thing this tool can do.
                 tracing::debug!(%err, "unreadable during walk");
                 unreadable += 1;
                 if unreadable <= MAX_UNREADABLE {
@@ -259,11 +217,8 @@ fn describe(err: &ignore::Error) -> (PathBuf, String) {
 }
 
 /// Is this directory one the walk will neither classify nor look inside?
-///
-/// `roots` are exempt from the name-based skips: naming `/Volumes/work` as a
-/// root is an explicit request that must beat the generic list. A `.git`
-/// directory is **not** exempt, however it was reached — it is machinery, and
-/// the bare-repository test would otherwise match it exactly.
+/// `roots` are exempt from the name-based skips; a `.git` directory is not
+/// exempt, however it was reached.
 fn excluded(dir: &Path, roots: &[PathBuf]) -> bool {
     is_git_dir(dir) || looks_dataless(dir) || is_hard_skipped(dir, roots)
 }
@@ -273,19 +228,14 @@ fn covered(found: &Mutex<Found>, dir: &Path) -> bool {
     found.lock().expect("discovery state poisoned").roots.iter().any(|r| dir.starts_with(r))
 }
 
-/// Classify `dir` and, if it is a repository, record and emit it.
-///
-/// Shared by the root pre-pass and the walk filter, which must agree: a root
-/// that is a repository has to arrive looking exactly like one found three
-/// levels down.
+/// Classify `dir` and, if it is a repository, record and emit it. Shared by
+/// the root pre-pass and the walk filter.
 fn accept(dir: &Path, found: &Mutex<Found>, count: &Mutex<usize>, tx: &UnboundedSender<RepoFound>) {
     let Some((kind, git_dir)) = classify(dir) else { return };
     found.lock().expect("discovery state poisoned").roots.push(dir.to_path_buf());
     *count.lock().expect("discovery state poisoned") += 1;
-    // `from_canonical` without a syscall is sound here: the roots were
-    // canonicalized above, and `follow_links(false)` means no component below
-    // them is ever a symlink, so every path this walk yields is already
-    // canonical.
+    // `from_canonical` skips a syscall: every path reaching here is already
+    // canonical, since roots are canonicalized and symlinks are never followed.
     let _ = tx.send(RepoFound {
         id: RepoId::from_canonical(dir),
         path: dir.to_path_buf(),
@@ -318,16 +268,15 @@ fn classify_git_file(dir: &Path, dot_git: &Path) -> Option<(RepoKind, PathBuf)> 
     let resolved = if raw.is_absolute() { raw.to_path_buf() } else { dir.join(raw) };
     let git_dir = resolved.canonicalize().unwrap_or(resolved);
 
-    // The owning repository is the parent of the `.git` directory the path runs
-    // through. Both `.../main/.git/worktrees/wt` and
-    // `.../super/.git/modules/sub` answer to the same rule.
+    // The owning repository is the parent of the `.git` directory the path
+    // runs through.
     let owner = owner_of(&git_dir);
     let s = git_dir.to_string_lossy();
     let kind = if s.contains("/worktrees/") {
         match owner.as_deref().and_then(|p| RepoId::new(p).ok()) {
             Some(main) => RepoKind::Worktree { main },
-            // A worktree whose main repository has been deleted is still a
-            // repository, and reporting it as normal beats dropping it.
+            // A worktree whose main repository was deleted is still a
+            // repository.
             None => RepoKind::Normal,
         }
     } else if s.contains("/modules/") {
@@ -341,12 +290,9 @@ fn classify_git_file(dir: &Path, dot_git: &Path) -> Option<(RepoKind, PathBuf)> 
     Some((kind, git_dir))
 }
 
-/// The worktree that owns a `.git` directory appearing inside `git_dir`.
-///
-/// Known simplification: for a submodule nested inside a submodule this returns
-/// the outermost superproject rather than the immediate parent, because the
-/// immediate parent's worktree location is not recoverable from the path alone.
-/// Nothing reads the linkage, so the cost is a slightly wrong label.
+/// The worktree that owns a `.git` directory appearing inside `git_dir`. For
+/// a submodule nested inside a submodule this returns the outermost
+/// superproject rather than the immediate parent.
 fn owner_of(git_dir: &Path) -> Option<PathBuf> {
     let mut acc = PathBuf::new();
     for comp in git_dir.components() {
@@ -358,10 +304,8 @@ fn owner_of(git_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// A bare repository: `HEAD`, `objects/` and `refs/` with no `.git`.
-///
-/// `HEAD` is checked first and alone, so the common case — an ordinary
-/// directory — costs exactly one extra stat per directory walked.
+/// A bare repository: `HEAD`, `objects/` and `refs/` with no `.git`. `HEAD` is
+/// checked first and alone, so the common case costs one extra stat.
 fn classify_bare(dir: &Path) -> Option<(RepoKind, PathBuf)> {
     if !dir.join("HEAD").is_file() {
         return None;
@@ -419,16 +363,11 @@ mod tests {
 
     #[test]
     fn a_root_that_is_itself_a_repository_is_found() {
-        // Regression: the walk used to return early at depth 0 without
-        // classifying, so `git-scylla scan ~/one-repo` answered "no
-        // repositories found" — the same sentence an empty directory gets, and
-        // in the GUI an empty grid with no hint as to why.
         let tmp = tempfile::tempdir().unwrap();
         let root = &tmp.path().canonicalize().unwrap();
         mk_normal(root);
         fs::create_dir_all(root.join("src/deep")).unwrap();
-        // Still pruned: a repository named as a root is one repository, not one
-        // plus whatever is checked out inside it.
+        // Still pruned: one repository, not one plus what's checked out inside it.
         mk_normal(&root.join("vendor/inner"));
 
         let found = collect(root, WalkOptions::default());
@@ -452,8 +391,6 @@ mod tests {
 
     #[test]
     fn a_git_directory_named_as_a_root_is_still_not_a_repository() {
-        // `.git` has HEAD, `objects/` and `refs/`, so the bare test matches it
-        // exactly. Pointing at one explicitly does not make it a repository.
         let tmp = tempfile::tempdir().unwrap();
         let dot_git = tmp.path().canonicalize().unwrap().join("r/.git");
         fs::create_dir_all(dot_git.join("objects")).unwrap();
@@ -465,9 +402,6 @@ mod tests {
 
     #[test]
     fn the_same_root_twice_yields_one_repository() {
-        // Two roots resolving to one repository must not emit it twice: the
-        // engine counts what it accepts, and a double count leaves a scan
-        // reporting more repositories than exist.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
         mk_normal(&root);
@@ -497,9 +431,6 @@ mod tests {
 
     #[test]
     fn the_reported_id_is_canonical_without_a_second_syscall() {
-        // The property the engine's scan accounting rests on: the id a consumer
-        // gets is the one `RepoId::new` would have produced, so nothing has to
-        // canonicalize again and risk a different answer.
         let tmp = tempfile::tempdir().unwrap();
         let root = &tmp.path().canonicalize().unwrap();
         mk_normal(&root.join("a"));
@@ -525,8 +456,6 @@ mod tests {
 
     #[test]
     fn a_head_file_alone_is_not_a_repository() {
-        // A directory containing a file called HEAD is common enough (docs,
-        // test fixtures) that the objects/refs check has to be load-bearing.
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join("notarepo")).unwrap();
         fs::write(tmp.path().join("notarepo/HEAD"), "hello").unwrap();
@@ -552,7 +481,6 @@ mod tests {
         fs::create_dir_all(sup.join(".git/modules/sub")).unwrap();
         let sub = sup.join("sub");
         fs::create_dir_all(&sub).unwrap();
-        // Submodules use a relative gitdir, which must resolve correctly.
         fs::write(sub.join(".git"), "gitdir: ../.git/modules/sub\n").unwrap();
 
         let found = collect(&root, WalkOptions { nested: true, max_depth: None });
@@ -564,9 +492,6 @@ mod tests {
 
     #[test]
     fn a_git_directory_is_not_reported_as_a_bare_repo() {
-        // Regression: `.git` has HEAD, objects/ and refs/, so the bare test
-        // matches it and `--nested` would report every repository twice — plus
-        // once more per submodule, from `.git/modules/<name>`.
         let tmp = tempfile::tempdir().unwrap();
         let root = &tmp.path().canonicalize().unwrap();
         let repo = root.join("r");
@@ -623,9 +548,6 @@ mod tests {
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
 
         assert!(found.iter().any(|f| f.path.file_name().unwrap() == "visible"));
-        // ...and the caller is told what could not be read. On macOS this is
-        // what TCC looks like, and a scan that reports nothing wrong while
-        // silently seeing nothing is the failure the hint exists to prevent.
         assert!(
             errors.iter().any(
                 |e| matches!(e, DiscoveryError::Unreadable { path, .. } if path.ends_with("locked"))

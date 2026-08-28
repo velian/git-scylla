@@ -1,7 +1,4 @@
-//! `git-scylla` — a supported surface, not a debugging aid.
-//!
-//! Every engine feature lands here first, because logic that can only be
-//! exercised through a webview cannot be tested in CI.
+//! `git-scylla` — CLI for the engine.
 
 mod batch;
 mod common;
@@ -30,10 +27,6 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Walk one or more roots and report the state of every repository found.
-    ///
-    /// Strictly read-only, and it never touches the network: `behind` is
-    /// computed from the locally cached remote-tracking refs, so the FETCH
-    /// column is how stale that number is.
     Scan {
         /// Directories to search.
         #[arg(required = true)]
@@ -75,9 +68,6 @@ enum Command {
     },
 
     /// Fetch, updating remote-tracking refs without touching any worktree.
-    ///
-    /// The one action that cannot alter a worktree or local history, which is
-    /// why it is the only one run automatically.
     Fetch {
         #[command(flatten)]
         common: BatchArgs,
@@ -89,11 +79,6 @@ enum Command {
         tags: bool,
 
         /// Run the fetch scheduler in the foreground, logging every decision.
-        ///
-        /// This is where the fetch policy actually gets debugged: the decisions
-        /// are one line each, they matter more than the outcomes, and a GUI is
-        /// a poor place to watch a fifteen-minute cycle. Ctrl-C stops it and
-        /// lets in-flight fetches finish.
         #[arg(long, conflicts_with_all = ["dry_run", "yes", "prune", "tags"])]
         daemon: bool,
 
@@ -103,9 +88,7 @@ enum Command {
     },
 
     /// Pull, updating the checked-out branch from its upstream.
-    ///
-    /// Requires a clean worktree in every mode. There is no autostash: a
-    /// silently stashed change is a change the user did not offer up.
+    /// Requires a clean worktree in every mode.
     Pull {
         #[command(flatten)]
         common: BatchArgs,
@@ -385,7 +368,6 @@ pub struct BatchArgs {
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
 pub enum Mode {
-    /// Refuse anything that is not a fast-forward. The safe default.
     FfOnly,
     Rebase,
     Merge,

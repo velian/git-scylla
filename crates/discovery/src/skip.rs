@@ -1,11 +1,7 @@
 use std::path::Path;
 
-/// Directory names never descended into.
-///
-/// Two different reasons, mixed because the action is the same: dependency and
-/// build directories holding thousands of files and the occasional vendored
-/// `.git` nobody wants, and system trees where the walk can only lose time or
-/// trip over TCC.
+/// Directory names never descended into: dependency and build trees, caches,
+/// and macOS system trees.
 pub const HARD_SKIP_NAMES: &[&str] = &[
     "node_modules",
     "target",
@@ -15,7 +11,6 @@ pub const HARD_SKIP_NAMES: &[&str] = &[
     "Library",
     "System",
     "Volumes",
-    // Caches whose contents are never a repository the user means.
     ".cache",
     ".gradle",
     "DerivedData",
@@ -23,8 +18,7 @@ pub const HARD_SKIP_NAMES: &[&str] = &[
 
 /// Should this directory be skipped outright?
 ///
-/// `roots` are exempt: naming `/Volumes/work` as a root is an explicit request
-/// that must beat the generic skip list.
+/// `roots` are exempt from the skip list.
 pub fn is_hard_skipped(dir: &Path, roots: &[std::path::PathBuf]) -> bool {
     if roots.iter().any(|r| r == dir) {
         return false;
@@ -32,9 +26,8 @@ pub fn is_hard_skipped(dir: &Path, roots: &[std::path::PathBuf]) -> bool {
     let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
-    // `Library` and `System` are only meaningful at the places macOS puts them;
-    // a project directory called `System` is a project directory. Matching them
-    // by bare name everywhere would silently drop real repositories.
+    // Only skipped where macOS actually puts them; a project directory named
+    // `System` is a project directory.
     if matches!(name, "Library" | "System" | "Volumes") {
         let anchored = dir.parent().is_some_and(|p| {
             p == Path::new("/")
@@ -46,31 +39,21 @@ pub fn is_hard_skipped(dir: &Path, roots: &[std::path::PathBuf]) -> bool {
     HARD_SKIP_NAMES.contains(&name)
 }
 
-/// Is this a `.git` directory?
-///
-/// Never descended into, and never classified. A `.git` directory contains
-/// `HEAD`, `objects/` and `refs/`, so the bare-repository test matches it
-/// exactly — and with `--nested` that turns every repository into two, plus one
-/// more for every submodule under `.git/modules/`. A `.git` directory is
-/// machinery, not a repository, and nothing inside one is either.
-///
-/// A *bare* repository is unaffected: it is conventionally named `<name>.git`,
-/// not `.git`.
+/// Is this a `.git` directory? Never descended into or classified: `HEAD`,
+/// `objects/` and `refs/` inside it would otherwise match the bare-repository
+/// test. A *bare* repository is named `<name>.git`, not `.git`, and is
+/// unaffected.
 pub fn is_git_dir(dir: &Path) -> bool {
     dir.file_name().is_some_and(|n| n == ".git")
 }
 
-/// Does this look like an iCloud Drive dataless placeholder?
-///
-/// Traversing into one asks the file provider to materialise it, turning a local
-/// scan into a download. The `.icloud` sidecar naming is a cheap, reliable
-/// signal; statting the entry to ask more precisely is itself what triggers the
-/// download.
+/// Does this look like an iCloud Drive dataless placeholder? Statting the
+/// entry to check more precisely would itself trigger materialization, so
+/// this matches on the `.icloud` sidecar naming alone.
 pub fn looks_dataless(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
-    // `~/Documents/foo.pdf` evicted from local storage becomes `.foo.pdf.icloud`.
     name.ends_with(".icloud") || (name.starts_with('.') && name.contains(".icloud"))
 }
 
@@ -91,7 +74,6 @@ mod tests {
         assert!(is_hard_skipped(Path::new("/System"), &[]));
         assert!(is_hard_skipped(Path::new("/Users/x/Library"), &[]));
         assert!(is_hard_skipped(Path::new("/Volumes"), &[]));
-        // A project that happens to be called System is not the system.
         assert!(!is_hard_skipped(Path::new("/Users/x/code/System"), &[]));
         assert!(!is_hard_skipped(Path::new("/Users/x/code/Library"), &[]));
     }
@@ -100,7 +82,6 @@ mod tests {
     fn an_explicit_root_beats_the_skip_list() {
         let roots = vec![PathBuf::from("/Volumes/work")];
         assert!(!is_hard_skipped(Path::new("/Volumes/work"), &roots));
-        // ...but only that exact directory, not everything named alike below it.
         assert!(is_hard_skipped(Path::new("/Volumes/work/x/node_modules"), &roots));
     }
 

@@ -1,9 +1,5 @@
-//! Discovery against the fixture set: the **exact** set of paths, and the
+//! Discovery against the fixture set: the exact set of paths, and the
 //! correct kind for each.
-//!
-//! Exactness is the point. A walker that finds everything it should plus a
-//! `.git` directory or a bare repository that is really machinery is not
-//! "mostly right"; it puts rows in the grid that the user cannot act on.
 
 use git_scylla_discovery::{RepoFound, WalkOptions, Walker};
 use git_scylla_testkit::FixtureSet;
@@ -37,7 +33,6 @@ fn discovers_exactly_the_fixture_set() {
     let actual: Vec<PathBuf> = found.keys().cloned().collect();
     assert_eq!(actual, expected);
 
-    // Every kind reported must be the one the fixture declares.
     for f in set.discoverable() {
         let rel = f.path.strip_prefix(&set.scan_root).unwrap();
         assert_eq!(found[rel].kind, f.expect.kind, "kind for {}", f.name);
@@ -65,10 +60,6 @@ fn nested_adds_exactly_the_nested_fixtures() {
 
 #[test]
 fn a_submodule_is_not_discovered_by_default() {
-    // A deliberate consequence of prune-on-match, asserted so that changing it
-    // has to be a decision. A submodule is a repository inside another
-    // repository's worktree; a bulk "pull everything" must not move submodules
-    // off the commits their superprojects pin them to.
     let tmp = tempfile::tempdir().unwrap();
     let set = FixtureSet::build(tmp.path()).expect("fixtures");
     let sub = set.get("submodule-sub").expect("submodule fixture");
@@ -86,9 +77,6 @@ fn a_submodule_is_not_discovered_by_default() {
 
 #[test]
 fn the_origins_used_as_remotes_are_outside_the_scan_root() {
-    // The fixture set puts its bare "remotes" in a sibling directory on
-    // purpose. If they leaked into repos/, the exactness assertion above would
-    // be asserting the wrong set and would drift silently.
     let tmp = tempfile::tempdir().unwrap();
     let set = FixtureSet::build(tmp.path()).expect("fixtures");
     for f in &set.fixtures {
