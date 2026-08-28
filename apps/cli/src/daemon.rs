@@ -1,8 +1,4 @@
 //! `git-scylla fetch --daemon` and `git-scylla status`.
-//!
-//! The daemon is where the fetch policy actually gets debugged. A GUI is a
-//! worse place to watch a fifteen-minute cycle: the decisions are one line each,
-//! they matter more than the outcomes, and a terminal keeps them.
 
 use crate::{common, render};
 use git_scylla_core::{FetchSchedule, JobOrigin, JobState, RepoSnapshot};
@@ -21,11 +17,8 @@ pub struct DaemonArgs {
     pub per_host: Option<usize>,
 }
 
-/// Run the scheduler in the foreground, logging every decision.
-///
-/// Never returns on its own: it is a daemon. Ctrl-C stops it, and the engine's
-/// shutdown lets in-flight fetches finish rather than abandoning them
-/// mid-`git`.
+/// Run the scheduler in the foreground, logging every decision. Runs until
+/// Ctrl-C.
 pub async fn run(args: DaemonArgs) -> ExitCode {
     let fetch = FetchPolicy {
         interval: args.interval.map(Duration::from_secs).unwrap_or(FetchPolicy::default().interval),
@@ -35,9 +28,6 @@ pub async fn run(args: DaemonArgs) -> ExitCode {
         nested: args.nested,
         limits: common::limits(args.concurrency, args.per_host),
         fetch: fetch.clone(),
-        // The daemon is the application's shape: long-running, over a fixed root
-        // set. It records fetch health so that `git-scylla status` — and the
-        // next launch of either surface — can see what it learned.
         cache: CacheMode::ReadWrite,
         ..Default::default()
     });
@@ -62,9 +52,8 @@ pub async fn run(args: DaemonArgs) -> ExitCode {
     );
     print_schedule(&outcome.snapshots, SystemTime::now());
 
-    // Ctrl-C stops the daemon rather than killing the process: an abandoned
-    // `git fetch` leaves its `ssh` behind, which is the orphan case
-    // `crates/exec` exists to prevent.
+    // Ctrl-C stops the daemon rather than killing the process, so an
+    // in-flight `git fetch` and its `ssh` exit cleanly.
     let interrupt = tokio::spawn(async {
         let _ = tokio::signal::ctrl_c().await;
     });
@@ -89,13 +78,13 @@ pub async fn run(args: DaemonArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// One line per decision. Only background work: a daemon reporting the user's
-/// own batches would be reporting something they can already see.
+/// One line per background decision. User-initiated batches are not logged
+/// here; their own progress output already shows them.
 fn log_event(event: &Event) {
     match event {
         Event::JobStateChanged { origin: JobOrigin::Background, repo, state, .. } => {
             let word = match state {
-                JobState::Queued => return, // not a decision, just a queue
+                JobState::Queued => return,
                 JobState::Running => "fetching",
                 JobState::Ok => "ok",
                 JobState::Failed { .. } => "failed",
@@ -106,9 +95,6 @@ fn log_event(event: &Event) {
         }
         Event::ReposUpserted(snaps) => {
             for s in snaps {
-                // The interesting transitions, and only those: a repository
-                // that fetched and is due again in fifteen minutes is not news
-                // every time it happens.
                 match &s.fetch.schedule {
                     FetchSchedule::BackingOff { until, failures } => println!(
                         "{}  {:<28} backing off ({failures}) until {}",
@@ -153,19 +139,14 @@ pub struct StatusArgs {
 }
 
 /// Fetch health per repository.
-///
-/// Answering "why does this say 3 behind" from a terminal must not require the
-/// application.
 pub async fn status(args: StatusArgs) -> ExitCode {
     let selection = match common::selection(args.select.as_deref()) {
         Ok(s) => s,
         Err(code) => return code,
     };
 
-    // Read, never write: this reads the daemon's recorded fetch health, which
-    // is what makes the question answerable from a terminal at all — but a
-    // one-shot command must not overwrite the application's cache with whatever
-    // roots were on its command line.
+    // CacheMode::Read: a one-shot command must not overwrite the daemon's
+    // recorded fetch health with whatever roots were on its own command line.
     let engine =
         Engine::start(Config { nested: args.nested, cache: CacheMode::Read, ..Default::default() });
     let h = engine.handle();
@@ -218,10 +199,8 @@ pub async fn status(args: StatusArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Is the scheduler content with this repository?
-///
-/// `Disabled` counts as healthy: a repository with no remote is not a problem
-/// to report, it is a repository with no remote.
+/// Is the scheduler content with this repository? A repository with no
+/// remote (`Disabled`) counts as healthy.
 fn healthy(s: &RepoSnapshot) -> bool {
     matches!(s.fetch.schedule, FetchSchedule::Due(_) | FetchSchedule::Disabled)
 }

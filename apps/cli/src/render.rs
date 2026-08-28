@@ -103,8 +103,7 @@ pub fn table(rows: &[RepoSnapshot]) {
         .collect();
 
     let headers = ["PATH", "BRANCH", "BADGE", "STATUS", "FETCH"];
-    // Widths from the plain strings, then colour is applied — otherwise the
-    // escape sequences are counted as characters and every column drifts.
+    // Widths from the plain strings; colour escapes must not count toward them.
     let mut w = headers.map(str::len);
     for row in &cells {
         for (i, cell) in row.iter().enumerate() {
@@ -151,41 +150,28 @@ fn pad(s: &str, w: usize) -> String {
 }
 
 fn branch_cell(s: &RepoSnapshot) -> String {
-    // A snapshot we could not read has no head to report. `RepoSnapshot::failed`
-    // carries a placeholder oid so the type is inhabited, and printing it would
-    // present that placeholder as a fact.
+    // An untrustworthy snapshot has no real head; its oid is a placeholder.
     if !s.is_trustworthy() {
         return "?".into();
     }
     match &s.head {
         Head::Branch(b) => b.clone(),
-        // An unborn branch is real information; marking it distinguishes a
-        // fresh `git init` from a checked-out branch of the same name.
         Head::Unborn(b) => format!("{b} (unborn)"),
         Head::Detached(oid) => format!("({})", oid.short()),
     }
 }
 
 /// The scheduler's health readout for this repository.
-///
-/// An old timestamp used to be a disclaimer attached to an untrustworthy
-/// number. With a scheduler behind it, it means something is *wrong* — backing
-/// off, quarantined or misconfigured — and this column has to say which rather
-/// than merely reporting an age.
 pub fn fetch_cell(s: &RepoSnapshot, now: SystemTime) -> String {
     match s.fetch_status() {
         FetchStatus::NoRemote => "no remote".into(),
         FetchStatus::Off => "off".into(),
-        // Not "quarantined" alone: without the reason it is a dead end, and the
-        // reason is the whole value of the state. The full text is in
-        // `git-scylla status`, which has the room for it.
         FetchStatus::Quarantined { reason } => format!("quarantined: {}", first_line(&reason)),
         FetchStatus::BackingOff { until, failures } => match until.duration_since(now) {
             Ok(d) => format!("retry in {} ({failures})", duration::brief(d)),
             Err(_) => format!("retry due ({failures})"),
         },
-        // A fetch stamped in the future means the clock moved; "just now" is
-        // the honest reading of it and the one `since` would give anyway.
+        // A future timestamp means the clock moved; "just now" is still honest.
         FetchStatus::Fetched { at } => {
             now.duration_since(at).map_or_else(|_| "just now".into(), duration::since)
         }
@@ -249,7 +235,6 @@ mod tests {
 
     #[test]
     fn no_remote_says_so_rather_than_never() {
-        // "never" would suggest a fetch is pending. There is nothing to fetch.
         assert_eq!(fetch_cell(&snap(), SystemTime::UNIX_EPOCH), "no remote");
     }
 

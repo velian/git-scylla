@@ -17,18 +17,11 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> ExitCode {
-    // `Selection` and not a bare `Filter`: `--filter` and `--select` are the
-    // same grammar with two names, so `all` and `*` have to mean the same thing
-    // here as they do on a mutating verb.
     let selection = match common::selection(args.filter.as_deref()) {
         Ok(s) => s,
         Err(code) => return code,
     };
 
-    // The same engine the mutating verbs use, rather than a second walk-and-probe
-    // pipeline of the CLI's own. Two of them meant two places to keep the probe
-    // deadline, the concurrency and the re-probe rules in step — and that
-    // orchestration belongs in a library crate, not in a surface.
     let engine = Engine::start(Config {
         nested: args.nested,
         max_depth: args.max_depth,
@@ -47,9 +40,6 @@ pub async fn run(args: Args) -> ExitCode {
     };
     engine.shutdown().await;
 
-    // A root that could not be walked is a configuration error, and the only
-    // thing `scan` treats as one. Finding nothing under a readable root is a
-    // report, not a failure.
     if common::found_nothing_fatally(&outcome) {
         return ExitCode::from(common::CANNOT_RUN);
     }
@@ -66,16 +56,12 @@ pub async fn run(args: Args) -> ExitCode {
         render::table(&rows);
     }
 
-    // `scan` is a report, not a check: it exits 0 even with nothing found and
-    // even with failed probes, both of which are visible in the output. Non-zero
-    // is reserved for being unable to run at all.
     ExitCode::SUCCESS
 }
 
 fn sort_rows(rows: &mut [RepoSnapshot], sort: Sort) {
     match sort {
-        // Badge order is the priority order; path breaks ties so the output is
-        // stable across runs.
+        // Path breaks ties, so the output is stable across runs.
         Sort::Badge => rows.sort_by(|a, b| a.badge().cmp(&b.badge()).then(a.path.cmp(&b.path))),
         Sort::Path => rows.sort_by(|a, b| a.path.cmp(&b.path)),
         Sort::Branch => rows.sort_by(|a, b| a.branch().cmp(&b.branch()).then(a.path.cmp(&b.path))),

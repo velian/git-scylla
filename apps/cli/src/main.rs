@@ -42,8 +42,7 @@ enum Command {
 
         /// Per-repository probe deadline, in milliseconds.
         ///
-        /// One repository on a slow or network volume must not stall the rest,
-        /// so exceeding this is an ordinary outcome and not an error.
+        /// A repository that exceeds this is reported, not treated as an error.
         #[arg(long, default_value_t = 2000)]
         timeout: u64,
 
@@ -55,10 +54,6 @@ enum Command {
         sort: Sort,
 
         /// Selection expression, e.g. 'dirty & branch:main' or 'behind:>0'.
-        ///
-        /// `--filter` is kept as an alias: it was named that before the
-        /// mutating verbs settled on `--select`, and one grammar with two names
-        /// is confusing enough without breaking the older one.
         #[arg(long, visible_alias = "filter")]
         select: Option<String>,
 
@@ -98,18 +93,13 @@ enum Command {
 
     /// Run an arbitrary git command in every selected repository.
     ///
-    /// The deliberate escape hatch. An argv, never a shell string:
-    /// everything after `--` is passed to `git` verbatim, with no shell and no
-    /// interpolation. Preconditions and undo do not apply, and the confirmation
-    /// says so.
+    /// Everything after `--` is passed to `git` verbatim as argv, with no
+    /// shell interpolation. Preconditions and undo do not apply.
     Run {
         #[command(flatten)]
         common: BatchArgs,
 
         /// Treat it as network work, so it takes the network semaphore.
-        ///
-        /// The default, because being wrong this way costs throughput and being
-        /// wrong the other way invites rate limiting.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         network: bool,
 
@@ -134,8 +124,7 @@ enum Command {
 
     /// Pop the most recent stash in every selected repository.
     ///
-    /// A pop that cannot apply leaves the stash entry alone — that is git's own
-    /// behaviour and the tool does not second-guess it. Conflicts are reported,
+    /// A failed pop leaves the stash entry in place. Conflicts are reported,
     /// never resolved.
     StashPop {
         #[command(flatten)]
@@ -144,9 +133,8 @@ enum Command {
 
     /// Check out a branch, tag or commit in every selected repository.
     ///
-    /// Requires a clean worktree: bulk checkout is genuinely useful — "put
-    /// every repository back on main" — and genuinely dangerous on dirty trees.
-    /// Repositories without the ref are skipped and named.
+    /// Requires a clean worktree. Repositories without the ref are skipped
+    /// and named.
     Checkout {
         #[command(flatten)]
         common: BatchArgs,
@@ -189,25 +177,20 @@ enum Command {
 
         /// Stage everything first, **including untracked files**.
         ///
-        /// `git add -A`, not `git commit -a`: the second stages tracked
-        /// modifications only. The plan says how many untracked files this
-        /// would sweep up.
+        /// `git add -A`, not `git commit -a`: the latter stages tracked
+        /// modifications only.
         #[arg(short = 'a', long)]
         all: bool,
 
         /// Skip the repository's own hooks.
-        ///
-        /// Off by default: a `pre-commit` that reformats, or refuses a secret,
-        /// is doing the job it was installed for.
         #[arg(long)]
         no_verify: bool,
     },
 
     /// Push, publishing local commits to their upstream.
     ///
-    /// Worktree state is irrelevant to a push and is deliberately not checked.
-    /// `--force` does not exist and never will: a bulk tool that can force-push
-    /// across forty repositories is one that will eventually do so by accident.
+    /// Worktree state is not checked. `--force` is not offered; use
+    /// `--force-with-lease`.
     Push {
         #[command(flatten)]
         common: BatchArgs,
@@ -218,52 +201,40 @@ enum Command {
 
         /// Refuse to overwrite anything that arrived since the last fetch.
         ///
-        /// The safe half of a force push, and the only half offered. Requires a
-        /// recent fetch — a lease against a stale remote-tracking ref is not a
-        /// lease — and a confirmation that cannot be given without reading the
-        /// plan.
+        /// Requires a recent fetch and confirmation by typing the affected
+        /// count.
         #[arg(long)]
         force_with_lease: bool,
     },
 
     /// Bring every selected repository's default branch up to date.
     ///
-    /// Stash, switch to `main`/`master`, pull, switch back, pop — five git
-    /// invocations that behave as one, so an interrupted batch cannot leave
-    /// forty working sets stashed and parked on the wrong branch. The switch
-    /// back and the pop run whether the pull succeeded or not.
+    /// Runs stash, checkout to the default branch, pull, checkout back, and
+    /// stash pop as one unit. The checkout-back and pop run regardless of
+    /// whether the pull succeeded.
     ///
-    /// The branch is resolved per repository from `origin/HEAD`, falling back
-    /// to `main` then `master`; `--dry-run` lists the exact commands, which is
-    /// where a repository that calls its trunk something else shows up.
+    /// The default branch is resolved per repository from `origin/HEAD`,
+    /// falling back to `main` then `master`.
     SyncDefault {
         #[command(flatten)]
         common: BatchArgs,
 
-        /// How to pull once there.
-        ///
-        /// The default refuses to merge or rebase, which for a branch the user
-        /// is not standing on is what they almost always want: a default branch
-        /// that cannot fast-forward has local commits on it, and quietly
-        /// reconciling those in bulk is not a thing to do without being asked.
+        /// How to pull once there. Defaults to fast-forward only.
         #[arg(long, value_enum, default_value_t = Mode::FfOnly)]
         mode: Mode,
     },
 
     /// Cut the next tag in a pre-release series, in every selected repository.
     ///
-    /// The name is derived per repository from *its* tags — the newest release
-    /// decides where the next series starts, an existing series carries on —
-    /// so a working set at different versions gets different names, and
-    /// `--dry-run` lists every one of them before anything is created.
+    /// The name is derived per repository from its own tags, so a working set
+    /// at different versions gets different names. `--dry-run` lists every one
+    /// before anything is created.
     ///
-    /// The tag is published **before** it is created locally, which is the
-    /// reverse of what you would type by hand and is deliberate: a name the
-    /// remote already has is refused, and refusing must leave nothing behind.
+    /// The tag is published before it is created locally: a name the remote
+    /// already has is refused before anything local exists.
     ///
-    /// Nothing here fetches. The derivation reads local tags, and the automatic
-    /// fetch does not include them, so run `git-scylla fetch --tags` first if
-    /// somebody else may have cut a tag since.
+    /// This does not fetch. Run `git-scylla fetch --tags` first if another tag
+    /// may have been cut since the last fetch.
     DevTag {
         #[command(flatten)]
         common: BatchArgs,
@@ -289,9 +260,6 @@ enum Command {
     },
 
     /// Report fetch health per repository.
-    ///
-    /// Answering "why does this say 3 behind" from a terminal must not require
-    /// the application.
     Status {
         #[arg(required = true)]
         roots: Vec<PathBuf>,
@@ -315,8 +283,7 @@ enum Command {
 
     /// Print the full transcript of a job from the last run.
     ///
-    /// With no argument, list that run's jobs. History is one run deep: this
-    /// answers "the batch just finished, what happened to number 37".
+    /// With no argument, list that run's jobs. History is one run deep.
     Log {
         /// Job id, as printed by `fetch`/`pull`.
         job: Option<u64>,
@@ -324,10 +291,6 @@ enum Command {
 }
 
 /// Roots and flags shared by every mutating verb.
-///
-/// `roots` lives here rather than on each variant: it was declared identically
-/// nine times, and a positional that drifts in one of them is a positional
-/// nobody notices has drifted.
 #[derive(clap::Args)]
 pub struct BatchArgs {
     /// Directories to search.
@@ -355,9 +318,6 @@ pub struct BatchArgs {
     pub nested: bool,
 
     /// Concurrent network jobs. Defaults to 8.
-    ///
-    /// Present on the mutating verbs and not only on `scan`: a limit no
-    /// surface can set is not configurable.
     #[arg(long)]
     pub concurrency: Option<usize>,
 
@@ -436,9 +396,7 @@ async fn main() -> std::process::ExitCode {
             .await
         }
 
-        // `--daemon` conflicts with `--prune`/`--tags`: the scheduler picks
-        // its own action (`prune: true, tags: false`), and letting the flag
-        // through would suggest it does not.
+        // The scheduler picks its own prune/tags; ignore the flags here.
         Command::Fetch { common, daemon: true, interval, .. } => {
             daemon::run(daemon::DaemonArgs {
                 roots: common.roots,
@@ -485,8 +443,7 @@ async fn main() -> std::process::ExitCode {
         }
 
         Command::DevTag { common, channel, bump, remote, no_push } => {
-            // `name: None` — the template. The engine derives one per
-            // repository from that repository's own tags.
+            // None: the engine derives the name per repository.
             let action = Action::DevTag {
                 channel,
                 bump: bump.into(),
@@ -497,9 +454,7 @@ async fn main() -> std::process::ExitCode {
         }
 
         Command::SyncDefault { common, mode } => {
-            // `plan: None` — the template. The engine resolves one of these per
-            // repository, because which branch is the default is a fact about
-            // `refs/` and not about a snapshot.
+            // None: the engine resolves the default branch per repository.
             batch::run(Action::SyncDefault { mode: mode.into(), plan: None }, common).await
         }
 

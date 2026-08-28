@@ -1,16 +1,14 @@
 //! Live progress.
 //!
-//! On a TTY: finished repositories scroll up as permanent lines while the
-//! currently-running ones sit in a block below, redrawn in place. Off a TTY:
-//! append-only, so `| tee` and CI logs stay readable — which is the whole
-//! reason the two modes exist rather than one clever one.
+//! On a TTY, finished repositories print as permanent lines while the
+//! currently-running ones sit in a block below, redrawn in place. Off a TTY,
+//! output is append-only, so `| tee` and CI logs stay readable.
 
 use git_scylla_core::{JobState, RepoId};
 use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
 
-/// Most running repositories to name at once. Beyond this the block would be
-/// taller than a terminal and redrawing it would flicker.
+/// Most running repositories to name at once before collapsing into a count.
 const MAX_BLOCK: usize = 8;
 
 pub struct Progress {

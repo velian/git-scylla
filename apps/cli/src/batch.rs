@@ -53,8 +53,6 @@ pub async fn run(action: Action, args: BatchArgs) -> ExitCode {
     };
     if outcome.snapshots.is_empty() {
         engine.shutdown().await;
-        // Nothing found *and* a root we could not read: a configuration
-        // problem, not an empty working set. Never silently "nothing to do".
         if common::found_nothing_fatally(&outcome) {
             return ExitCode::from(common::CANNOT_RUN);
         }
@@ -70,8 +68,8 @@ pub async fn run(action: Action, args: BatchArgs) -> ExitCode {
         }
     };
 
-    // The plan goes to stdout for --dry-run (it is the output) and to stderr
-    // otherwise (it is context for the run, and stdout belongs to --json).
+    // stdout for --dry-run, since it is the output; stderr otherwise, since
+    // stdout is reserved for --json.
     if args.dry_run {
         print!("{}", plan.render());
         engine.shutdown().await;
@@ -81,7 +79,6 @@ pub async fn run(action: Action, args: BatchArgs) -> ExitCode {
 
     if plan.is_empty() {
         engine.shutdown().await;
-        // Nothing eligible is not a failure; the plan already explained itself.
         return ExitCode::SUCCESS;
     }
 
@@ -135,9 +132,8 @@ async fn execute(handle: &EngineHandle, plan: Plan) -> (BatchId, BatchSummary, V
     let mut progress = Progress::new(total);
     let mut summary = BatchSummary::default();
 
-    // Ctrl-C cancels the batch rather than killing the process. Killing it
-    // would leave the `git` children — and their `ssh` grandchildren — running,
-    // which is the orphan case `crates/exec` exists to prevent.
+    // Ctrl-C cancels the batch rather than killing the process, so `git` and
+    // any `ssh` it spawned exit cleanly instead of being orphaned.
     let interrupt = {
         let (handle, batch) = (handle.clone(), batch);
         tokio::spawn(async move {
@@ -183,9 +179,6 @@ fn confirm(plan: &Plan) -> Confirmed {
         return Confirmed::CannotAsk;
     }
     let n = plan.eligible.len();
-    // A guarded plan asks for something that cannot be given without reading
-    // it. `y` is muscle memory after the third time; a number that changes with
-    // the selection is not.
     let (question, accepts) = match plan.view().confirm_guard {
         Some(ConfirmGuard::TypeCount(count)) => (
             format!(
@@ -202,20 +195,14 @@ fn confirm(plan: &Plan) -> Confirmed {
     };
     match ask(&question) {
         Some(answer) if accepts.met_by(&answer) => Confirmed::Yes,
-        // Unreadable stdin included: a question nobody could answer is not
-        // consent.
+        // Unreadable stdin is a no, not an error: no answer is not consent.
         _ => Confirmed::No,
     }
 }
 
-/// What a prompt will take for a yes.
-///
-/// Anything else is a no. A bulk mutation is not the place for a lenient
-/// parser, and having the three rules sit next to each other is what makes
-/// "the guarded ones are stricter" something you can see rather than trust.
+/// What a prompt will take for a yes. Anything else is a no.
 enum Accepts {
-    /// This exact string, case and all. The count guard's whole point is that
-    /// it cannot be answered without reading the plan.
+    /// This exact string, case and all.
     Exactly(String),
     /// `yes`, in any case.
     Yes,
@@ -234,10 +221,7 @@ impl Accepts {
     }
 }
 
-/// Put a question on stderr and read the answer.
-///
-/// stderr, because stdout belongs to `--json`. `None` when stdin could not be
-/// read at all.
+/// Put a question on stderr and read the answer. `None` if stdin is unreadable.
 fn ask(question: &str) -> Option<String> {
     eprint!("{question}");
     let _ = std::io::stderr().flush();
@@ -254,10 +238,8 @@ fn unit(n: usize) -> &'static str {
     }
 }
 
-/// Partial failure is a normal outcome, not an error state.
 fn print_summary(summary: &BatchSummary, jobs: &[Job]) {
     println!();
-    // The same sentence the GUI's drawer banner shows.
     println!("{}", summary.render());
 
     let failed: Vec<&Job> =
@@ -265,9 +247,6 @@ fn print_summary(summary: &BatchSummary, jobs: &[Job]) {
     if !failed.is_empty() {
         println!("\nfailed:");
         for job in &failed {
-            // Structured and actionable rather than raw stderr. A batch of
-            // forty in which three failed is a normal outcome; what makes it a
-            // usable one is the three saying what to do next.
             match git_scylla_core::explain(&job.log) {
                 Some(e) => {
                     println!("  {:<30} {}", job.repo.name(), e.kind);
@@ -286,7 +265,7 @@ fn print_summary(summary: &BatchSummary, jobs: &[Job]) {
 fn job_result(job: &Job) -> JobResult {
     let truncated = job.log.len() > JSON_LOG_LINES;
     let log = if truncated {
-        // Keep the tail: for a failed job the explanation is at the end.
+        // Keep the tail: a failed job's explanation is at the end.
         job.log[job.log.len() - JSON_LOG_LINES..].to_vec()
     } else {
         job.log.clone()
@@ -330,8 +309,7 @@ pub fn print_log(job_id: u64) -> ExitCode {
         println!("(no output)");
     }
     for line in &job.log {
-        // Relative to the job's start, which is what "when did this happen"
-        // means for a transcript.
+        // Timestamp relative to the job's start.
         let at = job
             .started_at
             .and_then(|s| line.at.duration_since(s).ok())
@@ -361,8 +339,6 @@ mod tests {
 
     #[test]
     fn a_lease_push_takes_the_count_and_nothing_else() {
-        // Not `y`, and not the word: the guard exists so the answer cannot be
-        // given from muscle memory.
         let accepts = Accepts::Exactly("31".to_string());
         assert!(accepts.met_by("31"));
         assert!(accepts.met_by("  31\n"));
@@ -385,8 +361,6 @@ mod tests {
         assert!(Accepts::YesOrY.met_by("y"));
         assert!(Accepts::YesOrY.met_by("Yes"));
         assert!(!Accepts::YesOrY.met_by("sure"));
-        // The empty answer is what pressing Return gives, and `[y/N]` says what
-        // that means.
         assert!(!Accepts::YesOrY.met_by(""));
     }
 }
