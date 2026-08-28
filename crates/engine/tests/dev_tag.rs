@@ -9,8 +9,10 @@
 use git_scylla_core::version::Bump;
 use git_scylla_core::{explain, Action, FailureKind, JobOrigin, JobState, SkipReason};
 use git_scylla_engine::{Config, Engine, EngineHandle, Event, Plan, Policy, Selection};
+use git_scylla_probe::{FakeProbe, FakeRepo};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 
 fn git(cwd: &Path, args: &[&str]) -> String {
@@ -289,5 +291,39 @@ async fn packed_tags_count() {
     h.scan_to_completion(vec![clone.parent().unwrap().to_path_buf()], false).await.unwrap();
     let plan = h.plan(dev_tag(Some("origin")), Selection::All).await.unwrap();
     assert!(command_for(&plan, "r0").contains("v2.4.0-dev.2"), "{}", command_for(&plan, "r0"));
+    engine.shutdown().await;
+}
+
+// ---- resolution without a filesystem -----------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repository_that_cannot_be_read_gets_no_tag_name() {
+    // **Not "it has no tags".** Reading `refs/tags` used to swallow its errors
+    // and return an empty list, and an empty list derives `dev.1` — so the plan
+    // offered to cut a name this repository may have used years ago, in a
+    // sentence the user had no way to doubt.
+    //
+    // The step order makes a name the *remote* already has safe. It does
+    // nothing for a name the local repository has and could not be asked about.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap().join("repos");
+    let probe = Arc::new(
+        FakeProbe::new()
+            .with(FakeRepo::new(root.join("readable")).tags(&["v2.3.7"]))
+            .with(FakeRepo::new(root.join("locked")).unreadable()),
+    );
+    probe.scaffold().unwrap();
+    let engine = Engine::with_probe(config(), probe);
+    let h = engine.handle();
+    h.scan_to_completion(vec![root], false).await.unwrap();
+
+    let plan = h.plan(dev_tag(None), Selection::All).await.unwrap();
+    assert_eq!(plan.eligible.len(), 1, "{:?}", plan.skipped);
+    assert!(command_for(&plan, "readable").contains("v2.4.0-dev.1"));
+
+    assert_eq!(plan.skipped.len(), 1);
+    let (id, why) = &plan.skipped[0];
+    assert!(id.path().ends_with("locked"), "{id:?}");
+    assert_eq!(*why, SkipReason::SnapshotStale, "an unreadable repository is not an untagged one");
     engine.shutdown().await;
 }

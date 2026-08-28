@@ -13,9 +13,10 @@
 
 use crate::git_cli::looks_like_revision;
 use crate::{BoxFuture, Probe, ProbeRequest, RefAnswer, RefError, RefQuery, RefRequest};
-use git_scylla_core::{RepoId, RepoSnapshot};
+use git_scylla_core::{Remote, RepoId, RepoSnapshot};
 use git_scylla_discovery::RepoFound;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 /// One repository as a test wants it to look.
 ///
@@ -34,13 +35,27 @@ pub struct FakeRepo {
 }
 
 impl FakeRepo {
-    /// A normal repository on `main`, with `main` as its default branch, no
-    /// tags and no other refs.
+    /// A normal repository on `main`, with `main` as its default branch, one
+    /// remote called `origin`, no tags and no other refs.
+    ///
+    /// Two deliberate departures from [`RepoSnapshot::stub`], both because this
+    /// snapshot is served to a *running engine* rather than handed to a pure
+    /// function:
+    ///
+    /// * `probed_at` is now, not the epoch. An engine refuses to act on a stale
+    ///   snapshot, so a permanently-stale fixture could only ever test one skip
+    ///   reason.
+    /// * There is a remote. Without one, `SyncDefault` and a publishing
+    ///   `DevTag` skip with `NoRemote` before any ref question is asked, which
+    ///   is never what a test that built a fake wanted to find out.
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
+        let mut snapshot = RepoSnapshot::stub(path.clone());
+        snapshot.probed_at = SystemTime::now();
+        snapshot.remotes = vec![Remote { name: "origin".to_string(), host: None }];
         Self {
             git_dir: path.join(".git"),
-            snapshot: RepoSnapshot::stub(path.clone()),
+            snapshot,
             default_branch: Some("main".to_string()),
             tags: Vec::new(),
             refs: vec!["main".to_string()],
@@ -138,6 +153,20 @@ impl FakeProbe {
     pub fn with(mut self, repo: FakeRepo) -> Self {
         self.repos.push(repo);
         self
+    }
+
+    /// Create the empty directories discovery needs in order to find these
+    /// repositories.
+    ///
+    /// A `.git` directory is the entire thing the walk looks for; everything it
+    /// would have read out of one comes from this fake instead. So a test gets
+    /// a working set of repositories without `git init`, without clones, and
+    /// without a single subprocess.
+    pub fn scaffold(&self) -> std::io::Result<()> {
+        for repo in &self.repos {
+            std::fs::create_dir_all(&repo.git_dir)?;
+        }
+        Ok(())
     }
 
     fn by_path(&self, path: &Path) -> &FakeRepo {

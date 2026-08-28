@@ -6,10 +6,12 @@
 //! or not** the pull succeeded, and that refuses rather than guesses when it
 //! cannot tell which branch to visit.
 
-use git_scylla_core::{Action, JobOrigin, JobState, Pass, PullMode, SkipReason, StepState};
+use git_scylla_core::{Action, Head, JobOrigin, JobState, Pass, PullMode, SkipReason, StepState};
 use git_scylla_engine::{Config, Engine, EngineHandle, Event, Plan, Policy, Selection};
+use git_scylla_probe::{FakeProbe, FakeRepo};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 
 fn git(cwd: &Path, args: &[&str]) -> String {
@@ -245,15 +247,20 @@ async fn standing_on_the_default_branch_with_work_in_the_tree_is_refused() {
     // the *only* arrangement in which the pop can conflict, because every other
     // one puts the work back on the branch it came from. The symptom was
     // conflict markers in a tracked file and a job that said `ok`.
+    //
+    // Driven through a fake since the rule became reachable that way: it is
+    // `default == back_to && !is_clean()` over a snapshot and one ref answer,
+    // and nothing in it needs a real clone to be true.
     let tmp = tempfile::tempdir().unwrap();
-    let (_, clone) = origin_and_clone(tmp.path(), "r0", "main");
-    git(&clone, &["checkout", "main"]);
-    std::fs::write(clone.join("a.txt"), "work in progress\n").unwrap();
-    let root = clone.parent().unwrap().to_path_buf();
-
-    let engine = Engine::start(config());
-    let h = engine.handle();
-    h.scan_to_completion(vec![root], false).await.unwrap();
+    let root = fake_root(&tmp);
+    let (engine, h) = fake_engine(
+        &root,
+        vec![FakeRepo::new(root.join("r0")).default_branch("main").snapshot(|s| {
+            // Standing on the default branch, with work in a tracked file.
+            s.work.modified = 1;
+        })],
+    )
+    .await;
     let plan = h.plan(SYNC, Selection::All).await.unwrap();
     assert!(plan.eligible.is_empty(), "{:?}", plan.eligible);
     assert_eq!(plan.skipped[0].1, SkipReason::DirtyWorktree);
@@ -348,5 +355,117 @@ async fn origin_head_beats_the_fallback() {
         // fallback would have picked.
         "git stash push && git checkout trunk && git pull --ff-only --no-autostash"
     );
+    engine.shutdown().await;
+}
+
+// ---- resolution without a filesystem -----------------------------------
+//
+// These drive the engine through a `FakeProbe`. The repositories are empty
+// `.git` directories and every fact — the snapshot, the default branch, whether
+// the git directory can be read at all — comes from the fake.
+//
+// What is left to test that way is the engine's half: how a ref answer becomes
+// a resolved action or a named skip. That half has nothing to learn from a real
+// clone, and until resolution went through the seam it could not be reached
+// without one.
+
+/// The scan root for a fake working set.
+///
+/// Canonicalized, because `RepoId` is: on macOS a temp dir is `/var/…`, a
+/// symlink to `/private/var/…`, and an uncanonicalized path would never match
+/// the id discovery reports.
+fn fake_root(tmp: &tempfile::TempDir) -> PathBuf {
+    tmp.path().canonicalize().unwrap().join("repos")
+}
+
+/// An engine whose probe answers for exactly these repositories, scanned.
+async fn fake_engine(root: &Path, repos: Vec<FakeRepo>) -> (Engine, EngineHandle) {
+    let probe = Arc::new(repos.into_iter().fold(FakeProbe::new(), FakeProbe::with));
+    probe.scaffold().unwrap();
+    let engine = Engine::with_probe(config(), probe);
+    let h = engine.handle();
+    h.scan_to_completion(vec![root.to_path_buf()], false).await.unwrap();
+    (engine, h)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_repository_gets_its_own_default_branch_without_a_filesystem() {
+    // The same claim as `each_repository_gets_its_own_default_branch_and_the_
+    // plan_says_which`, made without git: two repositories, two different
+    // trunks, one plan, no `git init` and no subprocess.
+    //
+    // This is the test that could not have been written before resolution went
+    // through the seam. It needs nothing but a substitutable probe.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = fake_root(&tmp);
+    let (engine, h) = fake_engine(
+        &root,
+        vec![
+            // Parked on `feature`, as the real fixture's clones are: the user
+            // is somewhere else, which is the case the action exists for. On
+            // the default branch already there is no switch to plan, and this
+            // test is about the switch.
+            FakeRepo::new(root.join("r0-main"))
+                .default_branch("main")
+                .snapshot(|s| s.head = Head::Branch("feature".into())),
+            FakeRepo::new(root.join("r1-master"))
+                .default_branch("master")
+                .snapshot(|s| s.head = Head::Branch("feature".into())),
+        ],
+    )
+    .await;
+
+    let plan = h.plan(SYNC, Selection::All).await.unwrap();
+    assert_eq!(plan.eligible.len(), 2, "{:?}", plan.skipped);
+    let rendered = plan.render();
+    assert!(rendered.contains("git checkout main"), "{rendered}");
+    assert!(rendered.contains("git checkout master"), "{rendered}");
+    // Not in the headline, for the same reason as the real-git version: naming
+    // one of them there would be wrong for the other.
+    assert!(!rendered.lines().next().unwrap().contains("master"), "{rendered}");
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trunk_the_probe_cannot_name_is_refused_by_name() {
+    // The engine's half of `a_repository_with_no_recognisable_default_is_
+    // refused_by_name`, which keeps its real clone because what it proves is
+    // that *the probe* returns nothing for a repository with no `origin/HEAD`
+    // and a trunk called neither `main` nor `master`.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = fake_root(&tmp);
+    let (engine, h) =
+        fake_engine(&root, vec![FakeRepo::new(root.join("r0")).no_default_branch()]).await;
+
+    let plan = h.plan(SYNC, Selection::All).await.unwrap();
+    assert!(plan.eligible.is_empty(), "{:?}", plan.eligible);
+    assert_eq!(plan.skipped[0].1, SkipReason::NoDefaultBranch);
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repository_that_cannot_be_read_is_stale_rather_than_trunkless() {
+    // The distinction the seam was widened to draw, and the reason a read
+    // failure is not an answer of "no".
+    //
+    // Reading `refs/` used to swallow its errors, so an unreadable git
+    // directory arrived as `None` and the plan told the user this repository
+    // has no default branch — a sentence that may be plainly false about a
+    // repository that has one. Unknown is not no, and the remedy differs:
+    // `SnapshotStale` says refresh and try again.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = fake_root(&tmp);
+    let (engine, h) = fake_engine(
+        &root,
+        vec![FakeRepo::new(root.join("readable")), FakeRepo::new(root.join("locked")).unreadable()],
+    )
+    .await;
+
+    let plan = h.plan(SYNC, Selection::All).await.unwrap();
+    assert_eq!(plan.eligible.len(), 1, "{:?}", plan.skipped);
+    assert_eq!(plan.skipped.len(), 1);
+    let (id, why) = &plan.skipped[0];
+    assert!(id.path().ends_with("locked"), "{id:?}");
+    assert_eq!(*why, SkipReason::SnapshotStale, "an unreadable repository is not a trunkless one");
     engine.shutdown().await;
 }
