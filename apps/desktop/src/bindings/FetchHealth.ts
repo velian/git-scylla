@@ -3,10 +3,6 @@ import type { FetchSchedule } from "./FetchSchedule";
 
 /**
  * Automatic-fetch bookkeeping for one repository.
- *
- * Engine state rather than a fact on disk, but it rides in the snapshot: that
- * is the single object shipped to every surface, and a parallel stream for
- * this would buy nothing but joins.
  */
 export type FetchHealth = { last_attempt: number | null, 
 /**

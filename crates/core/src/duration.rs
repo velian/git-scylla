@@ -1,16 +1,8 @@
 //! Durations, phrased.
-//!
-//! Here rather than in a surface because both of them render the same two
-//! things — how long until something, and how long since something — and two
-//! sets of thresholds is two sets to drift. The GUI's copy had already drifted
-//! into rendering a fetch from ten seconds ago as "just now ago".
 
 use std::time::Duration;
 
 /// A duration in the shortest unit that is not a lie: `45s`, `3m`, `2h`.
-///
-/// Forward-looking — "retry in 5m", "every 15m". Seconds survive the first
-/// minute because a countdown that starts at `0m` reads as broken.
 pub fn brief(d: Duration) -> String {
     let secs = d.as_secs();
     match secs {
@@ -21,9 +13,6 @@ pub fn brief(d: Duration) -> String {
 }
 
 /// How long ago, as a complete phrase: `just now`, `5m ago`, `3h ago`, `2d ago`.
-///
-/// A complete phrase and not a bare unit, because the one case that must not
-/// take a suffix is the one a caller appending " ago" would get wrong.
 pub fn since(d: Duration) -> String {
     let secs = d.as_secs();
     match secs {
@@ -49,8 +38,6 @@ mod tests {
 
     #[test]
     fn since_never_needs_a_suffix_added_to_it() {
-        // The bug this replaces: a caller appending " ago" to a bare unit
-        // produced "just now ago" for anything under ninety seconds.
         assert_eq!(since(Duration::from_secs(0)), "just now");
         assert_eq!(since(Duration::from_secs(89)), "just now");
         assert_eq!(since(Duration::from_secs(90)), "1m ago");

@@ -1,15 +1,6 @@
 //! Every place that spawns `git` must be registered here.
 //!
-//! The invariant is about **spawn sites**, not about subcommand strings:
-//! `filter.rs` legitimately contains `"rebase"` and `"merge"` as keywords, and a
-//! test that tripped on those would be deleted within a week.
-//!
-//! `GitCommand` is the only way to start a subprocess, so an allowlist of every
-//! `GitCommand::new` in non-test code accounts for every git invocation in the
-//! project. Adding one is then a deliberate act with a diff that says so.
-//!
-//! It matters because a plan sheet shows the argv, a transcript records it, and
-//! a process runs it. Those must be the same three strings.
+//! The invariant is about spawn sites, not about subcommand strings.
 
 use std::path::{Path, PathBuf};
 
@@ -35,8 +26,7 @@ fn workspace_root() -> PathBuf {
 
 /// Every `.rs` file under `crates/*/src` and `apps/*/src`.
 ///
-/// `tests/` directories are excluded: a test may drive `git` however it needs
-/// to, and the invariant is about the shipped code.
+/// `tests/` directories are excluded.
 fn production_sources(root: &Path) -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -55,8 +45,7 @@ fn production_sources(root: &Path) -> Vec<PathBuf> {
         for m in members.flatten() {
             walk(&m.path().join("src"), &mut out);
             // The Tauri crate's Rust lives under `src-tauri/src`, not `src` —
-            // `src` there is TypeScript. Without this the whole desktop crate
-            // was exempt from the rule by accident.
+            // `src` there is TypeScript.
             walk(&m.path().join("src-tauri/src"), &mut out);
         }
     }
@@ -66,9 +55,7 @@ fn production_sources(root: &Path) -> Vec<PathBuf> {
 
 /// Strip `#[cfg(test)]` modules and doc comments.
 ///
-/// A crude but sufficient cut: in this codebase the test module is the last item
-/// in a file, and doc comments are the only other place a `GitCommand::new`
-/// appears without being a spawn (the example on `GitCommand` itself).
+/// Assumes the test module is the last item in a file.
 fn production_code(text: &str) -> String {
     let body = match text.find("#[cfg(test)]") {
         Some(i) => &text[..i],
@@ -112,8 +99,6 @@ fn every_git_spawn_site_is_on_the_allowlist() {
 
 #[test]
 fn the_allowlist_does_not_rot() {
-    // An entry that no longer spawns git is a stale exemption, and a stale
-    // exemption is how the next one gets waved through.
     let root = workspace_root();
     for (rel, why) in ALLOWED_SPAWN_SITES {
         let path = root.join(rel);
@@ -139,8 +124,7 @@ const RAW_PROCESS_EXEMPT: &[(&str, &str)] = &[
 
 /// Does `needle` appear as its own identifier rather than as a suffix?
 ///
-/// Without this, `Command::new` matches inside `GitCommand::new` and the rule
-/// flags exactly the code that is obeying it.
+/// Without this, `Command::new` matches inside `GitCommand::new`.
 fn contains_identifier(code: &str, needle: &str) -> bool {
     let mut from = 0;
     while let Some(i) = code[from..].find(needle) {
@@ -157,8 +141,6 @@ fn contains_identifier(code: &str, needle: &str) -> bool {
 
 #[test]
 fn no_production_code_reaches_for_a_raw_process() {
-    // The hardening, the process group and the deadline apply only if nothing
-    // bypasses GitCommand.
     let root = workspace_root();
     let mut offenders = Vec::new();
 
@@ -186,9 +168,6 @@ fn no_production_code_reaches_for_a_raw_process() {
 
 #[test]
 fn the_identifier_match_does_not_flag_gitcommand() {
-    // The bug this test exists because of: a plain substring search for
-    // `Command::new` matches inside `GitCommand::new`, so the rule accuses the
-    // code that is obeying it.
     assert!(!contains_identifier("let c = GitCommand::new(p);", "Command::new"));
     assert!(contains_identifier("let c = Command::new(\"git\");", "Command::new"));
     assert!(contains_identifier("std::process::Command::new(x)", "process::Command"));
@@ -196,26 +175,16 @@ fn the_identifier_match_does_not_flag_gitcommand() {
 }
 
 /// `--force` appears nowhere in the shipped source.
-///
-/// A grep rather than an argv assertion, so that a bare `--force` reaching a
-/// spawn by any route — a future action, a helper, a string built somewhere
-/// unexpected — fails here rather than being noticed by whoever it happens to.
-///
-/// A bulk tool that can force-push across forty repositories is one that will
-/// eventually do so by accident.
 #[test]
 fn force_appears_nowhere_in_the_shipped_source() {
     let root = workspace_root();
     let mut found = Vec::new();
     for path in production_sources(&root) {
         let Ok(text) = std::fs::read_to_string(&path) else { continue };
-        // Truncated at the inline test module: the invariant is about shipped
-        // code, and the assertion that checks for a bare force necessarily
-        // contains one. Found by watching this test flag itself.
+        // Truncated at the inline test module: the invariant is about shipped code.
         let shipped = text.split("#[cfg(test)]").next().unwrap_or(&text);
         for (n, line) in shipped.lines().enumerate() {
-            // `--force-with-lease` is the safe half and the whole point of the
-            // distinction, so it is matched away before the check.
+            // `--force-with-lease` is safe, and is matched away before the check.
             let without_lease = line.replace("--force-with-lease", "");
             if without_lease.contains("\"--force\"") || without_lease.contains("\"-f\"") {
                 let rel = path.strip_prefix(&root).unwrap_or(&path).display().to_string();

@@ -4,15 +4,11 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 /// A single value summarising a snapshot, for display and sorting only.
 ///
-/// Derived, never stored. Declaration order **is** the sort priority: worst
-/// first, so problems surface at the top of the grid.
+/// Derived, never stored; declaration order is the sort priority, worst first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Badge {
     Conflict,
-    /// A merge, rebase, cherry-pick, revert or bisect left half-finished. Ranks
-    /// beside [`Badge::Conflict`] — a paused rebase is the most urgent thing
-    /// about a repository — but is not called one: a bisect has no conflicted
-    /// path in it.
+    /// A merge, rebase, cherry-pick, revert or bisect left half-finished.
     InProgress,
     Diverged,
     Behind,
@@ -47,24 +43,15 @@ impl RepoSnapshot {
     /// Precedence is the declaration order of [`Badge`], and nothing else
     /// breaks ties.
     pub fn badge(&self) -> Badge {
-        // A snapshot we do not trust must never present as clean.
         if !matches!(self.outcome, ProbeOutcome::Ok) {
             return Badge::Unknown;
         }
-        // Two badges rather than one: calling a bisect or a stopped
-        // `--no-commit` merge a "conflict" sent the user hunting for a
-        // conflicted path that does not exist. Which operation it is belongs in
-        // the status column, not in a one-value summary.
-        //
-        // Conflicted paths win the tie — they are the actionable half.
         if self.work.conflicted > 0 {
             return Badge::Conflict;
         }
         if self.op.is_some() {
             return Badge::InProgress;
         }
-        // A deleted tracking ref has no position to report. Falling through
-        // would render it identically to "in sync".
         if let Some(up) = &self.upstream {
             match &up.sync {
                 None => return Badge::Unknown,
@@ -80,8 +67,6 @@ impl RepoSnapshot {
         if self.work.staged > 0 {
             return Badge::Staged;
         }
-        // An unborn HEAD with nothing staged is genuinely clean; with staged
-        // files it was already caught above.
         Badge::Clean
     }
 }
@@ -114,8 +99,6 @@ mod tests {
 
     #[test]
     fn upstream_position_beats_worktree_state() {
-        // The whole point of the priority order: three unpushed commits matter
-        // more than an untracked scratch file.
         let mut s = with_sync(3, 0);
         s.work.untracked = 4;
         assert_eq!(s.badge(), Badge::Ahead);
@@ -142,14 +125,11 @@ mod tests {
 
     #[test]
     fn an_operation_in_progress_is_not_called_a_conflict() {
-        // A bisect has no conflicted path in it, and neither does a stopped
-        // `--no-commit` merge. Saying "conflict" sent the user hunting for one.
         for op in [InProgress::Bisect, InProgress::Merge, InProgress::CherryPick] {
             let mut s = snap();
             s.op = Some(op);
             assert_eq!(s.badge(), Badge::InProgress, "{op}");
         }
-        // With conflicted paths as well, the actionable fact wins.
         let mut s = snap();
         s.op = Some(InProgress::Merge);
         s.work.conflicted = 2;
@@ -191,8 +171,6 @@ mod tests {
 
     #[test]
     fn no_upstream_is_not_in_sync() {
-        // The badge is the same for both, so the counts column carries the
-        // distinction. Asserted so nobody folds the two cases together.
         assert_eq!(snap().badge(), Badge::Clean);
         assert!(snap().upstream.is_none());
         assert_eq!(with_sync(0, 0).badge(), Badge::Clean);

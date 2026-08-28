@@ -1,12 +1,4 @@
 //! Domain types for git-scylla. Pure: no I/O and no subprocesses.
-//!
-//! Everything here is a fact about a repository or a job, or a derivation from
-//! those facts. Needing the filesystem puts a thing in `discovery` or `probe`;
-//! needing to schedule or wait puts it in `engine`.
-//!
-//! A few constructors stamp a value with the wall clock. Nothing here *decides*
-//! from a clock — preconditions and fetch policy take `now` as an argument,
-//! which is what keeps them testable.
 
 mod action;
 mod badge;

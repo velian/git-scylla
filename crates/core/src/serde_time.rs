@@ -1,12 +1,6 @@
-//! `SystemTime` as Unix milliseconds.
+//! `SystemTime` as signed Unix milliseconds.
 //!
-//! serde's own form is a `{secs, nanos}` map, which is unpleasant from `jq` and
-//! worse from generated TypeScript. A signed millisecond count is what every
-//! consumer of this data wants.
-//!
-//! Precision is deliberately lossy: a round-trip truncates to the millisecond,
-//! so it is idempotent but not an identity. These timestamps only order a
-//! transcript and age a fetch, and neither needs finer.
+//! Precision truncates to the millisecond on round-trip.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -14,8 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 fn to_millis(t: SystemTime) -> i64 {
     match t.duration_since(UNIX_EPOCH) {
         Ok(d) => d.as_millis() as i64,
-        // Pre-epoch mtimes exist in the wild (bad archives, bad clocks). Not
-        // worth an error path; worth not panicking.
+        // Pre-epoch timestamps are not an error.
         Err(e) => -(e.duration().as_millis() as i64),
     }
 }
@@ -36,7 +29,7 @@ pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<SystemTime, D::Err
     Ok(from_millis(i64::deserialize(d)?))
 }
 
-/// [`Duration`] as whole milliseconds, for the same reasons.
+/// [`Duration`] as whole milliseconds.
 pub mod duration {
     use super::*;
 

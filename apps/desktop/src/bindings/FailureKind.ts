@@ -2,8 +2,5 @@
 
 /**
  * What kind of thing went wrong.
- *
- * Closed, and every variant earns its place by having a *different remedy*. A
- * kind that would be explained the same way as another is not a kind.
  */
 export type FailureKind = "NonFastForward" | "ProtectedBranch" | "Auth" | "Unreachable" | "LeaseStale" | "Conflict" | "HookRejected" | "RefNotFound" | "TagExists" | "WouldOverwrite" | "Unknown";

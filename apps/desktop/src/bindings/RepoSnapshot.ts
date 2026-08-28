@@ -12,20 +12,12 @@ import type { WorkTree } from "./WorkTree";
 
 /**
  * Everything the tool knows about one repository at one instant.
- *
- * A struct of orthogonal facts, not a state enum. A repository can be
- * untracked-dirty, staged, three ahead and seven behind at once; the
- * single-value summary is [`crate::Badge`], derived for display only.
  */
 export type RepoSnapshot = { id: RepoId, path: string, kind: RepoKind, head: Head, 
 /**
  * The commit `HEAD` resolves to.
  *
- * [`Head`] says *what* HEAD is; this says *where* it points, which for a
- * branch the head itself does not carry. `None` for an unborn branch.
- *
- * Kept for undo: deciding whether somebody has committed on top of a job's
- * result means comparing where HEAD is now against where the job left it.
+ * `None` for an unborn branch.
  */
 head_oid: Oid | null, upstream: Upstream | null, 
 /**
@@ -39,22 +31,9 @@ remotes: Array<Remote>, work: WorkTree, op: InProgress | null, stashes: number,
 fetch: FetchHealth, probed_at: number, outcome: ProbeOutcome, 
 /**
  * Restored from a previous run's cache and not yet re-read.
- *
- * Age cannot stand in for this. A cache written five seconds ago still
- * describes a repository nothing watched while the application was closed,
- * and "the user committed in a terminal, then relaunched" is exactly the
- * case an age test lets through.
  */
 from_cache: boolean, 
 /**
  * A watcher is covering this repository.
- *
- * Never persisted: watching is a fact about the running process, and a
- * cache claiming coverage would let a relaunch act on facts nothing had
- * checked since the last run.
- *
- * It exists for [`Self::is_stale`]. Age alone means a repository nobody
- * touches goes stale by sitting still, so thirty seconds after launch every
- * action on a current row is refused with "refresh first".
  */
 watched?: boolean, };

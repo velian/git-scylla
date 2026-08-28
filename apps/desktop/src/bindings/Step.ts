@@ -3,15 +3,7 @@
 /**
  * One `git` invocation, with the command that closes what it opened.
  *
- * `compensate` runs **after the forward pass, whether the job succeeded or
- * failed**, in reverse order over the steps that completed. It is not undo,
- * which repairs a job that succeeded and should not have; this finishes a job,
- * and a job that opened something has to close it either way. `stash push`
- * settles it: the pop is owed whether or not the pull in between worked.
- *
- * A failing compensation stops the ones still queued behind it, because each
- * assumes the steps after it have already been undone. Leaving the stash on
- * the stack because the return switch failed is recoverable; popping it onto
- * the branch the user did not want it on is not.
+ * `compensate` runs after the forward pass, in reverse order, whether the
+ * job succeeded or failed.
  */
 export type Step = { argv: Array<string>, compensate: Array<string> | null, };

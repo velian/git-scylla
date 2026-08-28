@@ -2,8 +2,5 @@
 
 /**
  * A multi-step git operation the user left half-finished.
- *
- * Every one of these makes most mutating actions unsafe, which is why it is a
- * first-class fact rather than something inferred from a dirty worktree.
  */
 export type InProgress = "Merge" | "Rebase" | "CherryPick" | "Revert" | "Bisect";

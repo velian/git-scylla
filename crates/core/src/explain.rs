@@ -1,66 +1,27 @@
 //! Turning a failed job's transcript into something a person can act on.
 //!
-//! A batch of forty in which three failed is a normal outcome, and the only
-//! thing that makes it a *usable* one is the three saying what to do next.
-//! `! [rejected] main -> main (fetch first)` is git talking to somebody who
-//! already knows what it means.
-//!
-//! Derived from the transcript rather than stored on the job. This is an
-//! interpretation of git's words, and interpretations improve while the words
-//! stay the same — a stored one would freeze whatever the tool understood on
-//! the day the job ran.
-//!
-//! Matching on English is sound because the hardened environment sets
-//! `LC_ALL=C`, which is there for this. Without it every string below would be
-//! a lottery decided by the user's locale.
+//! Matching on English is sound because the environment sets `LC_ALL=C`.
 
 use crate::{LogLine, Stream};
 use serde::{Deserialize, Serialize};
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 /// What kind of thing went wrong.
-///
-/// Closed, and every variant earns its place by having a *different remedy*. A
-/// kind that would be explained the same way as another is not a kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FailureKind {
-    /// The remote has commits this push does not contain.
     NonFastForward,
-    /// The remote refused the ref: a branch protection rule, or a hook on the
-    /// far side.
     ProtectedBranch,
-    /// Credentials. A prompt is impossible under this tool's environment, so
-    /// this is always a configuration problem and never a missed dialog.
     Auth,
-    /// The remote is not reachable, or is not there.
     Unreachable,
-    /// `--force-with-lease` refused because the remote moved since the last
-    /// fetch. The lease did its job.
+    /// `--force-with-lease` refused because the remote moved since the last fetch.
     LeaseStale,
-    /// A merge or rebase stopped on conflicts. Detect, stop, report — the tool
-    /// does not resolve them.
     Conflict,
-    /// A hook said no, and said so recognisably.
-    ///
-    /// In practice a hook on the *remote*. A local hook that exits non-zero
-    /// makes git print nothing of its own — the hook's output is the entire
-    /// failure — so there is no marker to match, and the job comes back as
-    /// [`FailureKind::Unknown`] carrying the hook's own words. Labelling every
-    /// unrecognised `Commit` failure a hook rejection would be a guess, and a
-    /// wrong label is worse than none.
+    /// Usually a hook on the remote; a failing local hook surfaces as `Unknown`.
     HookRejected,
-    /// The ref named does not exist here.
     RefNotFound,
     /// The remote already has a tag by this name, at a different commit.
-    ///
-    /// Its own kind rather than a `NonFastForward`, because the remedy differs:
-    /// nothing here needs pulling. The tool derived a name from a tag list that
-    /// was behind, and fetching *tags* — which the automatic fetch does not do —
-    /// is what fixes it.
     TagExists,
-    /// The worktree has changes the command refused to overwrite.
     WouldOverwrite,
-    /// Something else. The transcript is still there.
     Unknown,
 }
 
@@ -116,9 +77,6 @@ pub struct Explanation {
     /// What to do, when there is a useful answer.
     pub remedy: Option<String>,
     /// The line from git that this was read off.
-    ///
-    /// Always carried, never replaced: an interpretation the user disagrees
-    /// with is only arguable if they can see what it was made from.
     pub evidence: String,
 }
 
@@ -127,9 +85,6 @@ pub struct Explanation {
 /// `None` when nothing was written to stderr at all, which for a failed job
 /// means the failure was not git's to explain — a spawn error, or a deadline.
 pub fn explain(log: &[LogLine]) -> Option<Explanation> {
-    // Every stderr line, because the interesting one is rarely the last: a
-    // rejected push writes the `!` line, then several lines of advice, then a
-    // summary. The first *recognised* line wins.
     let stderr: Vec<&str> = log
         .iter()
         .filter(|l| l.stream == Stream::Stderr)
@@ -146,8 +101,6 @@ pub fn explain(log: &[LogLine]) -> Option<Explanation> {
             });
         }
     }
-    // Unrecognised, but there is still a first line and it is still the most
-    // informative thing available.
     stderr.first().map(|line| Explanation {
         kind: FailureKind::Unknown,
         remedy: None,
@@ -157,34 +110,16 @@ pub fn explain(log: &[LogLine]) -> Option<Explanation> {
 
 /// One line of git's stderr, if it says something recognisable.
 ///
-/// Ordered by specificity, not by likelihood: a stale lease also prints
-/// `[rejected]`, and reading it as an ordinary non-fast-forward would send the
-/// user to `pull` when the whole point of the lease was that something
-/// unexpected arrived.
+/// Ordered by specificity, not by likelihood.
 fn classify(line: &str) -> Option<FailureKind> {
     let lower = line.to_ascii_lowercase();
 
     if lower.contains("stale info") {
         return Some(FailureKind::LeaseStale);
     }
-    // Verified against real git, because the difference is one word: a
-    // diverged *branch* is rejected with `(fetch first)` and a *tag* with
-    // `(already exists)`. Reading the second as a non-fast-forward would send
-    // the user to `pull` to fix what is a name collision.
-    //
-    // Both of the tag's lines are matched — the `! [rejected]` one and the
-    // `hint:` beneath it — because they carry the fact in different words and
-    // a quieter push may print only one. The second condition is what keeps
-    // `fatal: a branch named 'x' already exists` out: that line has neither
-    // "tag" nor a rejection marker in it.
     if lower.contains("already exists") && (lower.contains("tag") || lower.contains("[rejected]")) {
         return Some(FailureKind::TagExists);
     }
-    // `cannot lock ref ... is at X but expected Y` is what a *concurrent* push
-    // looks like: the ref moved between this push negotiating and updating it.
-    // Grouped here rather than given its own kind because the remedy is
-    // identical — whoever won, this repository is now behind — and a kind that
-    // would be explained the same way as another is not a kind.
     if lower.contains("non-fast-forward")
         || lower.contains("fetch first")
         || lower.contains("cannot lock ref")
@@ -252,7 +187,6 @@ mod tests {
 
     #[test]
     fn a_rejected_push_says_to_pull_first() {
-        // What git actually writes, advice lines and all.
         let e = explain(&log(&[
             (Stream::Stderr, " ! [rejected]        main -> main (fetch first)"),
             (Stream::Stderr, "error: failed to push some refs to 'origin'"),
@@ -261,16 +195,11 @@ mod tests {
         .expect("an explanation");
         assert_eq!(e.kind, FailureKind::NonFastForward);
         assert_eq!(e.remedy.as_deref(), Some("pull first, then push again"));
-        // The line it was read off is kept: an interpretation the user
-        // disagrees with is only arguable if they can see its evidence.
         assert!(e.evidence.contains("[rejected]"), "{}", e.evidence);
     }
 
     #[test]
     fn losing_a_race_to_the_same_ref_is_a_non_fast_forward() {
-        // What a bulk push of repositories sharing one remote actually
-        // produces, and what a `[rejected]` line does not cover: the ref moved
-        // between this push negotiating and updating it.
         assert_eq!(
             kind_of(&[
                 "remote: error: cannot lock ref 'refs/heads/main': is at 5ec57ea but expected ee78ac6",
@@ -282,9 +211,6 @@ mod tests {
 
     #[test]
     fn a_stale_lease_is_not_an_ordinary_rejection() {
-        // Both print `[rejected]`. Reading a stale lease as a non-fast-forward
-        // would send the user to `pull` when the whole point of the lease was
-        // that something unexpected arrived — so specificity beats order.
         assert_eq!(
             kind_of(&[
                 " ! [rejected]        main -> main (stale info)",
@@ -296,8 +222,6 @@ mod tests {
 
     #[test]
     fn credentials_are_a_configuration_problem_and_never_a_missed_dialog() {
-        // A prompt is impossible under this tool's environment, so there is
-        // never a dialog the user failed to notice.
         for line in [
             "fatal: could not read Username for 'https://example.invalid': terminal prompts disabled",
             "git@example.invalid: Permission denied (publickey).",
@@ -309,8 +233,6 @@ mod tests {
 
     #[test]
     fn a_far_side_hook_is_a_protected_branch_and_a_near_side_one_is_not() {
-        // Different remedies: one is "push somewhere else", the other is "fix
-        // what the hook told you".
         assert_eq!(
             kind_of(&["remote: error: GH006: Protected branch update failed"]),
             Some(FailureKind::ProtectedBranch)
@@ -336,12 +258,6 @@ mod tests {
 
     #[test]
     fn a_tag_the_remote_already_has_is_not_a_non_fast_forward() {
-        // Both lines are git's own, copied from a real rejected tag push. The
-        // `! [rejected]` line has no "non-fast-forward" in it, so without a
-        // rule of its own this would fall through to `Unknown` — and the hint
-        // line beneath it *would* have matched `NonFastForward` on the word
-        // "rejected" had that rule been any looser, sending the user to `pull`
-        // to fix a name collision.
         assert_eq!(
             kind_of(&["! [rejected]        HEAD -> v1.0.0-dev.1 (already exists)"]),
             Some(FailureKind::TagExists)
@@ -350,18 +266,12 @@ mod tests {
             kind_of(&["hint: Updates were rejected because the tag already exists in the remote."]),
             Some(FailureKind::TagExists)
         );
-        // And the remedy points at the thing the automatic fetch does not do.
         assert!(FailureKind::TagExists.remedy().unwrap().contains("fetch tags"));
 
-        // A diverged branch is rejected with `(fetch first)`, not `(already
-        // exists)` — verified against real git — so it keeps the remedy that
-        // sends the user to `pull`.
         assert_eq!(
             kind_of(&["! [rejected]        HEAD -> main (fetch first)"]),
             Some(FailureKind::NonFastForward)
         );
-        // And `git branch` says "already exists" about something that is not a
-        // tag at all.
         assert_eq!(
             kind_of(&["fatal: a branch named 'wip' already exists"]),
             Some(FailureKind::Unknown),
@@ -379,8 +289,6 @@ mod tests {
 
     #[test]
     fn an_unrecognised_failure_still_carries_gits_own_words() {
-        // Never nothing. The honest answer to "I do not know what this is" is
-        // the line git wrote, not silence.
         let e = explain(&log(&[(Stream::Stderr, "fatal: something entirely new")]))
             .expect("an explanation");
         assert_eq!(e.kind, FailureKind::Unknown);
@@ -390,9 +298,6 @@ mod tests {
 
     #[test]
     fn the_first_recognised_line_wins_not_the_last() {
-        // A rejected push writes the `!` line, then several lines of advice.
-        // The advice mentions `git pull` and would classify as nothing; the
-        // summary line at the end says only "failed to push some refs".
         assert_eq!(
             kind_of(&[
                 " ! [rejected]        main -> main (non-fast-forward)",
@@ -405,9 +310,6 @@ mod tests {
 
     #[test]
     fn stdout_is_not_evidence_and_neither_is_silence() {
-        // Git says why on stderr. A job that failed with nothing there failed
-        // for a reason that was not git's to explain — a spawn error, a
-        // deadline — and inventing an explanation would be worse than none.
         assert_eq!(explain(&log(&[(Stream::Stdout, "error: not really")])), None);
         assert_eq!(explain(&[]), None);
         assert_eq!(explain(&log(&[(Stream::Stderr, "   ")])), None);
@@ -415,8 +317,6 @@ mod tests {
 
     #[test]
     fn a_notice_this_tool_wrote_is_not_gits_word_for_anything() {
-        // `Stream::Notice` is the tool talking. Reading its own words back as
-        // evidence about git would be a tool quoting itself.
         assert_eq!(explain(&log(&[(Stream::Notice, "cancelled; killed the process group")])), None);
     }
 }

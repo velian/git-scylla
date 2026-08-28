@@ -2,11 +2,6 @@
 
 /**
  * How a batch turned out.
- *
- * Partial failure is the normal case, so this is a tally and not a success
- * flag: 31 done, 3 failed and 13 skipped is a successful run.
- * [`Self::is_clean_sweep`] is deliberately the *only* predicate offered —
- * there is no `succeeded()` for a caller to misread.
  */
 export type BatchSummary = { ok: number, failed: number, skipped: number, cancelled: number, 
 /**

@@ -1,10 +1,6 @@
 //! The selection-expression grammar shared by the CLI's `--filter` and the
 //! GUI's filter box.
 //!
-//! In `core` rather than `engine` so both surfaces use one parser. Evaluation
-//! is a pure function over a `RepoSnapshot`, so nothing here wants the engine's
-//! company.
-//!
 //! ```text
 //! expr   := term ('&' term)*
 //! term   := '!'? (key ':' value | badge)
@@ -14,10 +10,6 @@
 //! cmp    := ('>' | '>=' | '<' | '<=' | '=')? number
 //! glob   := literal with '*' (any run) and '?' (any one)
 //! ```
-//!
-//! Deliberately small: no `|`, no parentheses, no precedence. Every term must
-//! match. Anything more expressive is a second language to learn for a tool
-//! whose whole job is a hundred rows.
 
 use crate::{Badge, Head, InProgress, RepoKind, RepoSnapshot};
 use std::path::Path;
@@ -48,11 +40,7 @@ pub enum FilterError {
 
 /// A conjunction of terms. Every term must match.
 ///
-/// Keeps the text it was parsed from: a UI showing an active filter must show
-/// what the user typed rather than a reconstruction, and it is the only sane
-/// wire form. Serializing a parsed `Filter` field-by-field would be a second
-/// grammar to keep in step, where source text round-trips through the parser
-/// that already exists.
+/// Keeps the text it was parsed from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Filter {
     source: String,
@@ -132,9 +120,6 @@ impl Filter {
     }
 
     /// `home` expands a leading `~/` in a `path:` glob.
-    ///
-    /// Passed in rather than read from the environment, so this crate stays a
-    /// pure function of its arguments and the tests stay honest.
     pub fn parse_with_home(expr: &str, home: Option<&Path>) -> Result<Self, FilterError> {
         if expr.trim().is_empty() {
             return Err(FilterError::Empty);
@@ -180,10 +165,7 @@ impl std::fmt::Display for Filter {
 
 /// On the wire a filter **is** its source text.
 ///
-/// Deserializing re-parses, so a malformed expression cannot cross the boundary
-/// and become a filter that silently matches nothing. Note that `~/` is not
-/// expanded here — there is no shell on this side and no `home` to pass in — so
-/// a caller that wants it must use [`Filter::parse_with_home`] itself.
+/// `~/` is not expanded here; use [`Filter::parse_with_home`] for that.
 impl serde::Serialize for Filter {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&self.source)
@@ -200,9 +182,6 @@ impl<'de> serde::Deserialize<'de> for Filter {
 impl Term {
     fn parse(body: &str, home: Option<&Path>) -> Result<Self, FilterError> {
         let Some((key, value)) = body.split_once(':') else {
-            // A bare word is accepted only as a badge, so `dirty` works as
-            // shorthand for `badge:dirty`. Anything else is a typo, and a typo
-            // that silently matches nothing is worse than an error.
             return match parse_badge(body) {
                 Some(b) => Ok(Term::Badge(b)),
                 None => Err(FilterError::BareWord(body.to_string())),
@@ -267,8 +246,6 @@ impl Term {
                 Head::Detached(_) => false,
             },
             Term::Name(g) => g.matches(s.id.name()),
-            // Matched against the full path, so `path:*/work/*` and
-            // `path:~/work/*` both behave the way a shell user expects.
             Term::Path(g) => g.matches(&s.path.to_string_lossy()),
             Term::Kind(k) => matches!(
                 (k, &s.kind),
@@ -294,9 +271,6 @@ impl Term {
             Term::Op(Some(want)) => s.op == Some(*want),
             Term::Count(field, cmp, n) => {
                 let lhs = match field {
-                    // A missing or gone upstream has no position. Treating it
-                    // as zero would make `behind:0` quietly true for a
-                    // repository whose upstream was deleted.
                     CountField::Ahead => match s.upstream.as_ref().and_then(|u| u.ahead()) {
                         Some(v) => v,
                         None => return false,
@@ -359,8 +333,7 @@ fn expand_home(v: &str, home: Option<&Path>) -> String {
 
 /// `*` matches any run of characters, `?` exactly one. Nothing else.
 ///
-/// A pattern with no wildcard is an exact match, not a substring match — so
-/// `branch:main` does not also select `maintenance`.
+/// A pattern with no wildcard is an exact match, not a substring match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Glob(String);
 
@@ -374,8 +347,7 @@ impl Glob {
     }
 }
 
-/// Iterative backtracking: linear in the happy case, and it cannot blow the
-/// stack on a pathological pattern the way the recursive form can.
+/// Iterative backtracking: cannot blow the stack on a pathological pattern.
 fn glob_match(pat: &[u8], text: &[u8]) -> bool {
     let (mut p, mut t) = (0usize, 0usize);
     let (mut star, mut resume) = (None, 0usize);
@@ -430,7 +402,6 @@ mod tests {
         assert!(Glob::new("*").matches(""));
         assert!(Glob::new("a*b*c").matches("axxbyyc"));
         assert!(!Glob::new("a*b*c").matches("axxbyy"));
-        // The backtracking case: repeated stars must not misreport.
         assert!(Glob::new("*a*a*a*").matches("bbaabbaabbaabb"));
         assert!(!Glob::new("*a*a*a*a").matches("bbaabbaabb"));
     }
@@ -464,7 +435,6 @@ mod tests {
 
     #[test]
     fn a_gone_upstream_matches_no_count_comparison() {
-        // Not even `behind:0`: a gone upstream has no position to compare.
         let mut s = snap("/r", "main");
         s.upstream = Some(Upstream {
             remote: "origin".into(),
@@ -475,7 +445,6 @@ mod tests {
         assert!(!Filter::parse("behind:0").unwrap().matches(&s));
         assert!(!Filter::parse("behind:>0").unwrap().matches(&s));
         assert!(Filter::parse("upstream:gone").unwrap().matches(&s));
-        // ...and negation still reaches it, so it is selectable either way.
         assert!(Filter::parse("!behind:>0").unwrap().matches(&s));
     }
 
@@ -508,7 +477,6 @@ mod tests {
         let s = snap("/Users/x/work/api", "main");
         let f = Filter::parse_with_home("path:~/work/*", Some(Path::new("/Users/x"))).unwrap();
         assert!(f.matches(&s));
-        // Without a home, `~` is a literal and simply fails to match.
         assert!(!Filter::parse("path:~/work/*").unwrap().matches(&s));
     }
 
@@ -525,8 +493,6 @@ mod tests {
 
     #[test]
     fn a_malformed_expression_cannot_arrive_over_the_wire() {
-        // It would otherwise become a filter that silently matches nothing,
-        // and the user would read "0 eligible" as good news.
         assert!(serde_json::from_str::<Filter>(r#""drity""#).is_err());
         assert!(serde_json::from_str::<Filter>(r#""""#).is_err());
     }
@@ -547,7 +513,6 @@ mod tests {
             Filter::parse("behind:lots").unwrap_err(),
             FilterError::BadComparison("lots".into())
         );
-        // A typo that silently matches nothing is worse than an error.
         assert_eq!(Filter::parse("drity").unwrap_err(), FilterError::BareWord("drity".into()));
     }
 }

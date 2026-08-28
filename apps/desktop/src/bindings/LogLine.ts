@@ -3,16 +3,9 @@ import type { Stream } from "./Stream";
 
 /**
  * One line of a job's transcript.
- *
- * Timestamped and stream-tagged so that after operating on forty repositories,
- * "what happened to number 37" is answerable. The two child streams merge into
- * one ordered sequence, because that is how a human saw it when they ran the
- * command by hand.
  */
 export type LogLine = { at: number, stream: Stream, 
 /**
- * Lossy UTF-8. Git writes filenames into its error messages, and on a
- * non-UTF-8 name that byte sequence must become a readable transcript line
- * rather than a failed job.
+ * Lossy UTF-8: git can write non-UTF-8 filenames into its error messages.
  */
 text: string, };

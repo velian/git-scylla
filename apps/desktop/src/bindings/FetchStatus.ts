@@ -2,12 +2,5 @@
 
 /**
  * What the fetch column is saying about a repository.
- *
- * The **decision** — which of these six things is true — is one decision and
- * lives here. The phrasing is not: a CLI table cell has one line to say it in,
- * and the grid has a cell plus a tooltip plus a button, so each surface
- * renders this its own way. What they may not do is disagree about which case
- * they are in, which is what they did while they each read
- * [`FetchSchedule`] for themselves.
  */
 export type FetchStatus = { "type": "NoRemote" } | { "type": "Off" } | { "type": "Quarantined", "value": { reason: string, } } | { "type": "BackingOff", "value": { until: number, failures: number, } } | { "type": "Fetched", "value": { at: number, } } | { "type": "Never" };

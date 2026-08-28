@@ -23,33 +23,20 @@ batch: BatchId | null, origin: JobOrigin, repo: RepoId,
  */
 action: Action, state: JobState, 
 /**
- * Populated from [`Action::steps`] when the job is created, so the plan and
- * the transcript describe the same commands.
+ * Populated from [`Action::steps`] when the job is created.
  */
 steps: Array<StepRun>, 
 /**
  * `HEAD` immediately before a mutating job. `None` for a non-mutating
- * action or an unborn branch. This one field is what makes undo real.
+ * action or an unborn branch.
  */
 head_before: Oid | null, 
 /**
- * Where the job left `HEAD`, recorded the same way and for the same
- * reason.
- *
- * `head_before` alone cannot tell an undo whether it is safe: a repository
- * whose HEAD is not `head_before` has *either* been changed by this job, or
- * been changed by this job and then committed on top of. Undoing the second
- * discards work nobody asked to lose.
+ * Where the job left `HEAD`.
  */
 head_after: Oid | null, 
 /**
- * The branch checked out when the job was planned.
- *
- * `None` for a detached HEAD, which has no branch to return to. Stamped
- * from the snapshot rather than read with a second `rev-parse`: the
- * snapshot already knows and the staleness precondition guarantees it is
- * current, so a subprocess per mutating job would be paid on every commit
- * and pull to serve only a checkout's undo.
+ * The branch checked out when the job was planned. `None` for a detached HEAD.
  */
 branch_before: string | null, 
 /**

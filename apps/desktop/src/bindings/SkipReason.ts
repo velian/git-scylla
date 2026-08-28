@@ -3,11 +3,5 @@ import type { InProgress } from "./InProgress";
 
 /**
  * Why a repository was left out of a batch.
- *
- * Closed rather than a string so the UI can render each case with its own
- * actionable explanation and the CLI can group a plan's skips by reason.
- *
- * Every reason says what is wrong in terms the user can act on: "no upstream
- * configured" tells them what to do, "skipped" does not.
  */
 export type SkipReason = { "type": "UpToDate" } | { "type": "NoUpstream" } | { "type": "UpstreamGone" } | { "type": "DirtyWorktree" } | { "type": "OperationInProgress", "value": InProgress } | { "type": "DetachedHead" } | { "type": "UnbornBranch" } | { "type": "BareRepo" } | { "type": "Diverged" } | { "type": "NoRemote" } | { "type": "SnapshotStale" } | { "type": "NotSelected" } | { "type": "RefNotFound", "value": string } | { "type": "NoStash" } | { "type": "NotUndoable", "value": string } | { "type": "NoDefaultBranch" } | { "type": "HeadMoved" };

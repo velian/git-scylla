@@ -3,20 +3,13 @@ use std::time::SystemTime;
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 /// One line of a job's transcript.
-///
-/// Timestamped and stream-tagged so that after operating on forty repositories,
-/// "what happened to number 37" is answerable. The two child streams merge into
-/// one ordered sequence, because that is how a human saw it when they ran the
-/// command by hand.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogLine {
     #[serde(with = "crate::serde_time")]
     #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub at: SystemTime,
     pub stream: Stream,
-    /// Lossy UTF-8. Git writes filenames into its error messages, and on a
-    /// non-UTF-8 name that byte sequence must become a readable transcript line
-    /// rather than a failed job.
+    /// Lossy UTF-8: git can write non-UTF-8 filenames into its error messages.
     pub text: String,
 }
 
@@ -37,8 +30,7 @@ pub enum Stream {
     Stdout,
     Stderr,
     /// Written by git-scylla, not by the child: a timeout, a cancellation, an
-    /// elision marker. Tagged distinctly so a transcript never attributes the
-    /// tool's own words to git.
+    /// elision marker.
     Notice,
 }
 

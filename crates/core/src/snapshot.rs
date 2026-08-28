@@ -5,10 +5,6 @@ use std::time::SystemTime;
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 /// Everything the tool knows about one repository at one instant.
-///
-/// A struct of orthogonal facts, not a state enum. A repository can be
-/// untracked-dirty, staged, three ahead and seven behind at once; the
-/// single-value summary is [`crate::Badge`], derived for display only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoSnapshot {
     pub id: RepoId,
@@ -17,11 +13,7 @@ pub struct RepoSnapshot {
     pub head: Head,
     /// The commit `HEAD` resolves to.
     ///
-    /// [`Head`] says *what* HEAD is; this says *where* it points, which for a
-    /// branch the head itself does not carry. `None` for an unborn branch.
-    ///
-    /// Kept for undo: deciding whether somebody has committed on top of a job's
-    /// result means comparing where HEAD is now against where the job left it.
+    /// `None` for an unborn branch.
     pub head_oid: Option<Oid>,
     pub upstream: Option<Upstream>,
     /// Fetchable targets. `Remote::host` is the per-host concurrency bucket key
@@ -37,22 +29,9 @@ pub struct RepoSnapshot {
     pub probed_at: SystemTime,
     pub outcome: ProbeOutcome,
     /// Restored from a previous run's cache and not yet re-read.
-    ///
-    /// Age cannot stand in for this. A cache written five seconds ago still
-    /// describes a repository nothing watched while the application was closed,
-    /// and "the user committed in a terminal, then relaunched" is exactly the
-    /// case an age test lets through.
     #[serde(default)]
     pub from_cache: bool,
     /// A watcher is covering this repository.
-    ///
-    /// Never persisted: watching is a fact about the running process, and a
-    /// cache claiming coverage would let a relaunch act on facts nothing had
-    /// checked since the last run.
-    ///
-    /// It exists for [`Self::is_stale`]. Age alone means a repository nobody
-    /// touches goes stale by sitting still, so thirty seconds after launch every
-    /// action on a current row is refused with "refresh first".
     #[serde(default, skip_serializing)]
     pub watched: bool,
 }
@@ -60,8 +39,7 @@ pub struct RepoSnapshot {
 impl RepoSnapshot {
     /// No staged, modified, untracked or conflicted paths.
     ///
-    /// A bare repository has no worktree, so it is vacuously clean. Any caller
-    /// reading this as "safe to mutate" must also consult [`Self::op`].
+    /// A bare repository is vacuously clean; callers must also consult [`Self::op`].
     pub fn is_clean(&self) -> bool {
         self.work.is_clean()
     }
@@ -73,21 +51,11 @@ impl RepoSnapshot {
 
     /// Is this older than `max_age`, or the product of a probe that failed?
     ///
-    /// Derived from `probed_at` rather than stored as a flag, which is what
-    /// makes the startup cache safe: a restored snapshot carries the previous
-    /// run's timestamp, so it is stale by construction and the `SnapshotStale`
-    /// precondition refuses it without anything remembering to set a bit.
-    ///
-    /// A snapshot from the future is treated as fresh: a clock moved, and
-    /// refusing every action on the machine until it settles is the worse of
-    /// the two failures.
+    /// A snapshot from the future is treated as fresh.
     pub fn is_stale(&self, now: SystemTime, max_age: std::time::Duration) -> bool {
         if self.from_cache || !self.is_trustworthy() {
             return true;
         }
-        // A watched repository is current whatever its age: the watcher would
-        // have said if it had changed, which is a positive guarantee where a
-        // timestamp is only the absence of one.
         if self.watched {
             return false;
         }
@@ -103,24 +71,14 @@ impl RepoSnapshot {
 
     /// The compact status column, e.g. `↑3 ↓7 ●2 +1 ?4`.
     ///
-    /// Two distinctions are load-bearing, and both are the ones tools like this
-    /// usually get wrong:
-    ///
-    /// * no upstream renders as `-`, never as `↑0 ↓0`
-    /// * a deleted remote-tracking ref renders as `↑? ↓?`, never as in-sync
-    ///
-    /// In `core` rather than in a surface because the CLI's STATUS column and
-    /// the grid's are the same column. They were two implementations that
-    /// happened to agree, and the second had already lost the case where a bare
-    /// repository carries an upstream.
+    /// No upstream renders as `-`, never as `↑0 ↓0`. A deleted remote-tracking
+    /// ref renders as `↑? ↓?`, never as in-sync.
     pub fn status_line(&self) -> String {
         let mut parts = Vec::new();
         if !self.kind.has_worktree() {
             parts.push("bare".to_string());
         }
         match &self.upstream {
-            // "-" says "no upstream configured", which is not a fact about a
-            // repository with no branch checked out.
             None if self.kind.has_worktree() => parts.push("-".to_string()),
             None => {}
             Some(up) => match &up.sync {
@@ -160,12 +118,6 @@ impl RepoSnapshot {
     }
 
     /// Fetch **health**, not a fetch timestamp.
-    ///
-    /// With fetching automatic, an old timestamp is not a caveat on the
-    /// `behind` count — it is a fault, and the column has to name which. The
-    /// phrasing is left to each surface, because a table cell and a cell with a
-    /// tooltip behind it have different room; the *decision* is here so they
-    /// cannot disagree about what they are describing.
     pub fn fetch_status(&self) -> FetchStatus {
         match &self.fetch.schedule {
             FetchSchedule::Disabled => {
@@ -181,11 +133,6 @@ impl RepoSnapshot {
             FetchSchedule::BackingOff { until, failures } => {
                 FetchStatus::BackingOff { until: *until, failures: *failures }
             }
-            // The newest fetch by anyone, and only then this tool's own last
-            // success. The grid consulted both and the CLI only the first, so a
-            // repository the scheduler had fetched but whose `FETCH_HEAD` was
-            // missing read as "never" in one surface and as fetched in the
-            // other.
             FetchSchedule::Due(_) => {
                 match self.upstream.as_ref().and_then(|u| u.last_fetch).or(self.fetch.last_success)
                 {
@@ -198,14 +145,7 @@ impl RepoSnapshot {
 
     /// A clean repository at `path`, on `main`, tracking nothing.
     ///
-    /// For tests. Seven modules across three crates each wrote these fourteen
-    /// fields out by hand, so every field added to `RepoSnapshot` meant editing
-    /// seven fixtures with no opinion about it — and each of those fixtures
-    /// silently decided things its tests were not about. Override what the test
-    /// *is* about and leave the rest.
-    ///
-    /// `probed_at` is the epoch: a fixture must not be accidentally fresh, and
-    /// anything that cares about age passes its own `now`.
+    /// `probed_at` is `SystemTime::UNIX_EPOCH`.
     #[cfg(any(test, feature = "testkit"))]
     pub fn stub(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
@@ -230,13 +170,7 @@ impl RepoSnapshot {
 
     /// A snapshot for a repository we could not probe.
     ///
-    /// Never a silently empty "clean" snapshot: the outcome carries the
-    /// failure, [`Self::badge`] returns `Unknown`, and [`Self::is_trustworthy`]
-    /// is false.
-    ///
-    /// `head` gets a placeholder, because an "unknown" variant would put a case
-    /// in every match arm for a value only this constructor produces. Callers
-    /// must gate on `is_trustworthy()` before reading `head`.
+    /// Callers must gate on [`Self::is_trustworthy`] before reading `head`.
     pub fn failed(id: RepoId, kind: RepoKind, at: SystemTime, outcome: ProbeOutcome) -> Self {
         Self {
             path: id.path().to_path_buf(),
@@ -259,16 +193,11 @@ impl RepoSnapshot {
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-/// Adjacent tagging (`{"type": ..., "value": ...}`) rather than internal, which
-/// cannot represent a newtype variant wrapping a string. One uniform shape
-/// across every enum is worth more to the TypeScript generator than a flatter
-/// one for the struct variants. Enums whose variants are all unit-valued keep
-/// serde's default plain-string form.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
 pub enum RepoKind {
     Normal,
-    /// No worktree, so working-tree state is meaningless rather than clean.
+    /// No worktree, so working-tree state does not apply.
     Bare,
     /// `.git` is a file pointing into the main repository's `worktrees/`.
     Worktree {
@@ -293,9 +222,7 @@ impl RepoKind {
 pub enum Head {
     Branch(String),
     Detached(Oid),
-    /// A fresh `git init`: `HEAD` names a branch that does not exist yet. The
-    /// string is that branch name, which is real information even though no
-    /// commit carries it.
+    /// A fresh `git init`: `HEAD` names a branch that does not exist yet.
     Unborn(String),
 }
 
@@ -308,14 +235,11 @@ pub struct Upstream {
     /// The short tracking ref — `"origin/main"`.
     pub remote_ref: String,
     /// `None` when the upstream is configured but its remote-tracking ref does
-    /// not exist. Deliberately not `ahead: 0, behind: 0`: "the branch it tracks
-    /// was deleted" and "in sync" are opposite facts, and an `Option` makes
-    /// reading one as the other a compile error rather than a quiet
-    /// reassurance.
+    /// not exist.
     pub sync: Option<AheadBehind>,
-    /// Mtime of `FETCH_HEAD`: somebody fetched, including the user in their own
-    /// terminal. Distinct from [`FetchHealth::last_success`], which only this
-    /// tool's scheduler writes.
+    /// Mtime of `FETCH_HEAD`, set by any fetch including the user's own.
+    /// Distinct from [`FetchHealth::last_success`], which only this tool's
+    /// scheduler writes.
     #[serde(with = "crate::serde_time::option")]
     #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub last_fetch: Option<SystemTime>,
@@ -358,8 +282,7 @@ pub struct Remote {
     /// `"origin"`.
     pub name: String,
     /// Host parsed from the configured URL. `None` for a path remote or an
-    /// unparseable URL — this is a concurrency bucket key and never a
-    /// correctness input, so a miss costs throughput and nothing else.
+    /// unparseable URL.
     pub host: Option<String>,
 }
 
@@ -383,9 +306,6 @@ impl WorkTree {
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 /// A multi-step git operation the user left half-finished.
-///
-/// Every one of these makes most mutating actions unsafe, which is why it is a
-/// first-class fact rather than something inferred from a dirty worktree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InProgress {
     Merge,
@@ -412,8 +332,7 @@ impl std::fmt::Display for InProgress {
 #[serde(tag = "type", content = "value")]
 pub enum ProbeOutcome {
     Ok,
-    /// The probe hit its deadline. One slow volume must not stall the grid, so
-    /// this is an ordinary outcome rather than an error.
+    /// The probe hit its deadline.
     Timeout,
     Error(String),
 }
@@ -462,17 +381,11 @@ mod tests {
     fn bare_repositories_do_not_claim_a_missing_upstream() {
         let mut s = snap();
         s.kind = RepoKind::Bare;
-        // "-" would say "no upstream configured", which is not a fact about a
-        // repository that has no branch checked out.
         assert_eq!(s.status_line(), "bare");
     }
 
     #[test]
     fn a_bare_repository_that_does_track_something_still_reports_it() {
-        // The case the grid's own copy of this had lost: it stopped at "bare"
-        // and dropped the counts entirely. Nothing produces this today —
-        // `probe_bare` leaves `upstream` unset — which is exactly why a second
-        // implementation could disagree here for as long as it liked.
         let mut s = tracked(Some(AheadBehind { ahead: 3, behind: 0 }));
         s.kind = RepoKind::Bare;
         assert_eq!(s.status_line(), "bare \u{2191}3");
@@ -490,8 +403,6 @@ mod tests {
 
     #[test]
     fn no_remote_and_opted_out_are_different_states() {
-        // "off" for a repository with nothing to fetch from would be a setting
-        // the user did not choose.
         assert_eq!(snap().fetch_status(), FetchStatus::NoRemote);
         let mut s = snap();
         s.remotes = vec![Remote { name: "origin".into(), host: None }];
@@ -505,14 +416,9 @@ mod tests {
         s.fetch.schedule = FetchSchedule::Due(SystemTime::UNIX_EPOCH);
         assert_eq!(s.fetch_status(), FetchStatus::Never);
 
-        // The scheduler's own success counts when `FETCH_HEAD` says nothing.
-        // The CLI read only `last_fetch` and the grid read both, so one of them
-        // called this repository unfetched.
         s.fetch.last_success = Some(at);
         assert_eq!(s.fetch_status(), FetchStatus::Fetched { at });
 
-        // Anyone's fetch outranks it: the user's own `git fetch` in a terminal
-        // is what the behind count is as current as.
         let newer = at + Duration::from_secs(60);
         s.upstream.as_mut().unwrap().last_fetch = Some(newer);
         assert_eq!(s.fetch_status(), FetchStatus::Fetched { at: newer });

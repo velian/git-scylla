@@ -2,9 +2,5 @@
 
 /**
  * A repository's identity: its canonicalized absolute path.
- *
- * Canonicalized once, at construction, and never again. Every later
- * comparison, map key and selection is then a plain path comparison — no
- * filesystem access, and no chance of two ids for one repository.
  */
 export type RepoId = string;

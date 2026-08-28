@@ -3,8 +3,6 @@
 /**
  * Who asked for this job.
  *
- * Selects the scheduler's priority class, and whether the job appears in the
- * drawer unbidden. The background fetch scheduler is the only producer of
- * `Background`.
+ * The background fetch scheduler is the only producer of `Background`.
  */
 export type JobOrigin = "User" | "Background";

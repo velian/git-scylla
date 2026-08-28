@@ -2,10 +2,6 @@
 
 /**
  * One repository's answer to "sync the default branch".
- *
- * Every field differs per repository, which is why it exists as a unit: a plan
- * that showed only the action would be claiming a uniformity the working set
- * does not have.
  */
 export type SyncPlan = { 
 /**
@@ -13,16 +9,10 @@ export type SyncPlan = {
  */
 default: string, 
 /**
- * The branch to come back to. A name, never `-`: the plan has to *show*
- * where the user will be left, and `git checkout -` shows nothing.
+ * The branch to come back to, by name — never `-`.
  */
 back_to: string, 
 /**
- * Stash first, because there is tracked work in the way of the switch.
- *
- * Untracked files are deliberately left alone. They rarely block a
- * checkout, and stashing them means a failed pop leaves a user's
- * build output and scratch files inside a stash entry — recoverable,
- * alarming, and avoidable.
+ * Stash first, when there is tracked work in the way of the switch.
  */
 stash: boolean, };

@@ -2,10 +2,5 @@
 
 /**
  * A git object id.
- *
- * Hex string rather than 20 bytes: every producer (`git` stdout) and consumer
- * (`git reset --hard <oid>`, the transcript, the UI) speaks hex, so bytes would
- * mean decoding and re-encoding at every boundary to buy nothing. The width is
- * loose so SHA-256 repositories parse.
  */
 export type Oid = string;

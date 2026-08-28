@@ -15,10 +15,5 @@ export type Batch = { id: BatchId,
 action: Action, origin: JobOrigin, jobs: Array<JobId>, 
 /**
  * The batch this one undoes, if it is an undo.
- *
- * Marked so it can be excluded: never undo an undo. One level, explicit,
- * recent — a stack would need a history the tool deliberately does not
- * keep, and a second undo of the same work is a `reset --hard` whose target
- * nobody chose.
  */
 undoes: BatchId | null, started_at: number, finished_at: number | null, };

@@ -2,9 +2,5 @@
 
 /**
  * Which component the next series starts from.
- *
- * A team decision rather than a fact, so it is asked rather than assumed. The
- * plan shows the derived name, so a wrong answer is visible before anything is
- * created.
  */
 export type Bump = "Major" | "Minor" | "Patch";

@@ -32,9 +32,7 @@ impl std::fmt::Display for BatchId {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 /// Who asked for this job.
 ///
-/// Selects the scheduler's priority class, and whether the job appears in the
-/// drawer unbidden. The background fetch scheduler is the only producer of
-/// `Background`.
+/// The background fetch scheduler is the only producer of `Background`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JobOrigin {
     User,
@@ -59,10 +57,7 @@ impl JobState {
         !matches!(self, JobState::Queued | JobState::Running)
     }
 
-    /// Did anything actually run against the repository?
-    ///
-    /// `Skipped` did not, which is why 31 done and 13 skipped is a successful
-    /// run rather than a partial failure.
+    /// Did anything actually run against the repository? `Skipped` did not.
     pub fn ran(&self) -> bool {
         matches!(self, JobState::Ok | JobState::Failed { .. } | JobState::Cancelled)
     }
@@ -94,27 +89,14 @@ pub struct Job {
     /// Resolved for **this** repository, not the batch's template.
     pub action: Action,
     pub state: JobState,
-    /// Populated from [`Action::steps`] when the job is created, so the plan and
-    /// the transcript describe the same commands.
+    /// Populated from [`Action::steps`] when the job is created.
     pub steps: Vec<StepRun>,
     /// `HEAD` immediately before a mutating job. `None` for a non-mutating
-    /// action or an unborn branch. This one field is what makes undo real.
+    /// action or an unborn branch.
     pub head_before: Option<Oid>,
-    /// Where the job left `HEAD`, recorded the same way and for the same
-    /// reason.
-    ///
-    /// `head_before` alone cannot tell an undo whether it is safe: a repository
-    /// whose HEAD is not `head_before` has *either* been changed by this job, or
-    /// been changed by this job and then committed on top of. Undoing the second
-    /// discards work nobody asked to lose.
+    /// Where the job left `HEAD`.
     pub head_after: Option<Oid>,
-    /// The branch checked out when the job was planned.
-    ///
-    /// `None` for a detached HEAD, which has no branch to return to. Stamped
-    /// from the snapshot rather than read with a second `rev-parse`: the
-    /// snapshot already knows and the staleness precondition guarantees it is
-    /// current, so a subprocess per mutating job would be paid on every commit
-    /// and pull to serve only a checkout's undo.
+    /// The branch checked out when the job was planned. `None` for a detached HEAD.
     pub branch_before: Option<String>,
     /// The whole transcript, interleaved and ordered. `StepRun::log` indexes
     /// into it.
@@ -156,9 +138,6 @@ impl Job {
     }
 
     /// A job that never ran, and why.
-    ///
-    /// A skip is a first-class outcome with a place in the batch, not an
-    /// absence: the plan must account for every repository it was shown.
     pub fn skipped(
         id: JobId,
         batch: Option<BatchId>,
@@ -181,11 +160,8 @@ impl Job {
         end.duration_since(start).ok()
     }
 
-    /// The transcript lines belonging to one step.
-    ///
-    /// Clamped rather than panicking: eliding a large transcript leaves ranges
-    /// pointing past the end, and a stale index must not take down the UI
-    /// trying to render it.
+    /// The transcript lines belonging to one step. Clamped rather than panicking
+    /// on an out-of-range index.
     pub fn step_log(&self, step: &StepRun) -> &[LogLine] {
         let end = step.log.end.min(self.log.len());
         let start = step.log.start.min(end);
@@ -204,11 +180,6 @@ pub struct Batch {
     pub origin: JobOrigin,
     pub jobs: Vec<JobId>,
     /// The batch this one undoes, if it is an undo.
-    ///
-    /// Marked so it can be excluded: never undo an undo. One level, explicit,
-    /// recent — a stack would need a history the tool deliberately does not
-    /// keep, and a second undo of the same work is a `reset --hard` whose target
-    /// nobody chose.
     #[serde(default)]
     pub undoes: Option<BatchId>,
     #[serde(with = "crate::serde_time")]
@@ -227,11 +198,6 @@ impl Batch {
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 /// How a batch turned out.
-///
-/// Partial failure is the normal case, so this is a tally and not a success
-/// flag: 31 done, 3 failed and 13 skipped is a successful run.
-/// [`Self::is_clean_sweep`] is deliberately the *only* predicate offered —
-/// there is no `succeeded()` for a caller to misread.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatchSummary {
     pub ok: usize,
@@ -264,23 +230,12 @@ impl BatchSummary {
         self.ok + self.failed + self.skipped + self.cancelled + self.pending
     }
 
-    /// Nothing failed and nothing was cancelled.
-    ///
-    /// Not "succeeded": a run with skips is a success, and a run with failures
-    /// is still a run whose other results stand.
+    /// Nothing failed, was cancelled, or is still pending.
     pub fn is_clean_sweep(&self) -> bool {
         self.failed == 0 && self.cancelled == 0 && self.pending == 0
     }
 
     /// The tally as one sentence: `31 ok, 3 failed, 13 skipped in 4.2s`.
-    ///
-    /// Here rather than in either surface, so the drawer and the CLI cannot
-    /// drift into two shapes for one sentence.
-    ///
-    /// Zero counts are left out — a run that skipped nothing should not have to
-    /// say so — and a run that did nothing at all says that rather than
-    /// rendering an empty line. Nothing is styled as a failure: 31 done and 3
-    /// failed is a run whose other results stand.
     pub fn render(&self) -> String {
         let mut parts = Vec::new();
         for (n, label) in [
@@ -337,7 +292,6 @@ mod tests {
 
     #[test]
     fn a_queued_job_already_knows_the_commands_it_will_run() {
-        // So the plan sheet and the transcript describe the same thing.
         let j = Job::queued(
             JobId(1),
             Some(BatchId(1)),
@@ -382,8 +336,6 @@ mod tests {
         ] {
             assert!(s.is_terminal(), "{s:?}");
         }
-        // Skipped is terminal but did not run; that distinction is what keeps a
-        // batch of skips from reading as a batch of failures.
         assert!(!JobState::Skipped { why: SkipReason::UpToDate }.ran());
         assert!(JobState::Cancelled.ran());
     }
@@ -407,7 +359,6 @@ mod tests {
 
     #[test]
     fn a_run_with_only_skips_is_a_clean_sweep() {
-        // 31 done and 13 skipped is a successful run.
         let jobs =
             vec![job(1, JobState::Ok), job(2, JobState::Skipped { why: SkipReason::UpToDate })];
         let s = BatchSummary::of(&jobs, Duration::ZERO);
@@ -434,8 +385,6 @@ mod tests {
 
     #[test]
     fn a_step_log_range_past_the_end_is_clamped_not_a_panic() {
-        // Eliding a large transcript leaves ranges pointing past the end.
-        // Rendering a stale index must not take down the UI.
         let mut j = job(1, JobState::Ok);
         j.log = vec![LogLine::notice("only line")];
         let mut step = StepRun::pending(crate::Step::simple(vec!["fetch".into()]), Pass::Forward);
@@ -463,7 +412,6 @@ mod tests {
         let once = serde_json::to_string(&j).unwrap();
         let back: Job = serde_json::from_str(&once).unwrap();
 
-        // Everything except the sub-millisecond part of a timestamp is exact.
         assert_eq!(back.id, j.id);
         assert_eq!(back.state, j.state);
         assert_eq!(back.action, j.action);
@@ -472,23 +420,17 @@ mod tests {
         assert_eq!(back.started_at, j.started_at, "whole millis are exact");
         assert_eq!(back.finished_at, j.finished_at);
 
-        // Millisecond precision on purpose, so a round-trip is idempotent
-        // rather than an identity.
         assert_eq!(serde_json::to_string(&back).unwrap(), once);
     }
 
     #[test]
     fn durations_are_plain_millis_on_the_wire() {
-        // Not serde's {secs, nanos} map: TypeScript is generated from these.
         let s = BatchSummary { ok: 1, duration: Duration::from_millis(1500), ..Default::default() };
         let json = serde_json::to_value(s).unwrap();
         assert_eq!(json["duration"], 1500);
     }
     #[test]
     fn the_summary_reads_as_an_outcome_not_a_verdict() {
-        // 31 done, 3 failed and 13 skipped is a run whose other results stand,
-        // and the sentence says so: a tally in a fixed order, with nothing
-        // marked as an error state.
         let s = BatchSummary {
             ok: 31,
             failed: 3,
@@ -506,8 +448,6 @@ mod tests {
         let clean = BatchSummary { ok: 2, duration: Duration::from_secs(1), ..Default::default() };
         assert_eq!(clean.render(), "2 ok in 1.0s");
 
-        // Mid-flight: `pending` is the field most easily forgotten, and a
-        // summary that omits a non-zero count is a summary that lies.
         let midway = BatchSummary {
             ok: 1,
             pending: 4,

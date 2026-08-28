@@ -7,7 +7,6 @@ export type Remote = {
 name: string, 
 /**
  * Host parsed from the configured URL. `None` for a path remote or an
- * unparseable URL — this is a concurrency bucket key and never a
- * correctness input, so a miss costs throughput and nothing else.
+ * unparseable URL.
  */
 host: string | null, };

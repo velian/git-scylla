@@ -3,10 +3,6 @@ use std::path::{Path, PathBuf};
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 /// A repository's identity: its canonicalized absolute path.
-///
-/// Canonicalized once, at construction, and never again. Every later
-/// comparison, map key and selection is then a plain path comparison — no
-/// filesystem access, and no chance of two ids for one repository.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RepoId(PathBuf);
@@ -14,9 +10,7 @@ pub struct RepoId(PathBuf);
 impl RepoId {
     /// Canonicalize `path` into an id.
     ///
-    /// Fails only if the path cannot be resolved, which for a repository just
-    /// discovered means it was deleted underneath us. A caller that ignores
-    /// that will key a map on a lie.
+    /// Fails only if the path cannot be resolved.
     pub fn new(path: impl AsRef<Path>) -> std::io::Result<Self> {
         Ok(Self(path.as_ref().canonicalize()?))
     }
@@ -54,11 +48,6 @@ pub enum OidError {
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 /// A git object id.
-///
-/// Hex string rather than 20 bytes: every producer (`git` stdout) and consumer
-/// (`git reset --hard <oid>`, the transcript, the UI) speaks hex, so bytes would
-/// mean decoding and re-encoding at every boundary to buy nothing. The width is
-/// loose so SHA-256 repositories parse.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Oid(String);

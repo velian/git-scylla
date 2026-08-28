@@ -2,11 +2,5 @@
 
 /**
  * What happened to one step.
- *
- * Not [`crate::JobState`]. A step cannot be `Skipped { why: SkipReason }` —
- * every `SkipReason` is a fact about a *repository's* preconditions, not about
- * a command — and a step needs `NotRun`, which no `JobState` expresses. Reusing
- * a type whose variants are mostly unreachable is how unreachable variants get
- * reached.
  */
 export type StepState = { "type": "Pending" } | { "type": "Running" } | { "type": "Ok" } | { "type": "Failed", "value": { code: number, } } | { "type": "Cancelled" } | { "type": "NotRun" };

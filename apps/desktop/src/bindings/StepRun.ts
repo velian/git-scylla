@@ -8,9 +8,6 @@ import type { StepState } from "./StepState";
  */
 export type StepRun = { step: Step, pass: Pass, state: StepState, 
 /**
- * A range into [`crate::Job::log`], so the transcript stays one ordered
- * stream while remaining attributable per step. A slice rather than a
- * nested `Vec` because the ordering across steps is the thing a reader
- * needs, and copies of it would drift.
+ * A range into [`crate::Job::log`].
  */
 log: { start: number, end: number, }, };

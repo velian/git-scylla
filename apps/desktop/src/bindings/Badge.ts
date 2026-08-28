@@ -3,7 +3,6 @@
 /**
  * A single value summarising a snapshot, for display and sorting only.
  *
- * Derived, never stored. Declaration order **is** the sort priority: worst
- * first, so problems surface at the top of the grid.
+ * Derived, never stored; declaration order is the sort priority, worst first.
  */
 export type Badge = "Conflict" | "InProgress" | "Diverged" | "Behind" | "Ahead" | "Dirty" | "Staged" | "Clean" | "Unknown";

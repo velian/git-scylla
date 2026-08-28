@@ -15,15 +15,12 @@ remote: string,
 remote_ref: string, 
 /**
  * `None` when the upstream is configured but its remote-tracking ref does
- * not exist. Deliberately not `ahead: 0, behind: 0`: "the branch it tracks
- * was deleted" and "in sync" are opposite facts, and an `Option` makes
- * reading one as the other a compile error rather than a quiet
- * reassurance.
+ * not exist.
  */
 sync: AheadBehind | null, 
 /**
- * Mtime of `FETCH_HEAD`: somebody fetched, including the user in their own
- * terminal. Distinct from [`FetchHealth::last_success`], which only this
- * tool's scheduler writes.
+ * Mtime of `FETCH_HEAD`, set by any fetch including the user's own.
+ * Distinct from [`FetchHealth::last_success`], which only this tool's
+ * scheduler writes.
  */
 last_fetch: number | null, };

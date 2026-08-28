@@ -7,46 +7,30 @@ import type { SyncPlan } from "./SyncPlan";
 
 /**
  * What to do to a repository.
- *
- * Closed and explicit rather than a free-form string, so preconditions and
- * undo semantics are defined exhaustively per variant — the compiler then
- * refuses a new action without deciding both. [`Action::Custom`] is the
- * deliberate escape hatch, and is exempt from undo.
- *
- * An `Action` is **resolved for one repository**. The planner turns a template
- * into one of these per repository, and the plan displays the resolved value,
- * not the template.
  */
 export type Action = { "type": "Fetch", "value": { prune: boolean, tags: boolean, } } | { "type": "Pull", "value": { mode: PullMode, } } | { "type": "Push", "value": { 
 /**
  * `Some(remote)` sets the upstream to that remote, for a branch that
  * has none. `None` pushes to the configured upstream.
- *
- * Not a `set_upstream: bool`. `git push -u` with no remote and no
- * refspec is fatal, so a bool plus an absent remote is a state that
- * cannot produce a working command; an `Option` makes it
- * unrepresentable.
  */
 set_upstream: string | null, force_with_lease: boolean, } } | { "type": "Checkout", "value": { rev: string, create: boolean, } } | { "type": "Commit", "value": { 
 /**
  * The template before the planner resolves it, the rendered message
- * afterwards. One field, because the resolved value is both what the
- * plan shows and what the executor runs.
+ * afterwards.
  */
 message: string, stage_all: boolean, 
 /**
  * Skip the repository's own hooks.
- *
- * Off by default and surfaced in the plan. A `pre-commit` that
- * reformats, or refuses a secret, is doing the job it was installed
- * for; a bulk tool that bypassed it silently would be the fastest way
- * to commit something that should not exist.
  */
 no_verify: boolean, } } | { "type": "Stash", "value": { include_untracked: boolean, } } | { "type": "StashPop" } | { "type": "Branch", "value": { name: string, 
 /**
  * Where to start it. `None` is the current `HEAD`.
  */
-from: string | null, } } | { "type": "Reset", "value": { to: Oid, mode: ResetMode, } } | { "type": "SyncDefault", "value": { mode: PullMode, plan: SyncPlan | null, } } | { "type": "DevTag", "value": { 
+from: string | null, } } | { "type": "Reset", "value": { to: Oid, mode: ResetMode, } } | { "type": "SyncDefault", "value": { mode: PullMode, 
+/**
+ * `None` in a template, `Some` once resolved for one repository.
+ */
+plan: SyncPlan | null, } } | { "type": "DevTag", "value": { 
 /**
  * The series: `dev`, `rc`, whatever the team writes.
  */
@@ -54,23 +38,22 @@ channel: string,
 /**
  * Where a *new* series starts, from the newest release.
  */
-bump: Bump, name: string | null, 
+bump: Bump, 
+/**
+ * `None` in a template, `Some` once derived for one repository.
+ */
+name: string | null, 
 /**
  * Publish to this remote. `None` creates it locally only.
  */
 push: string | null, } } | { "type": "Custom", "value": { args: Array<string>, 
 /**
  * Does this reach the network, and so take the network semaphore?
- *
- * From the saved definition: the engine cannot reason about an
- * arbitrary command and must not pretend to. Defaults to `true` where
- * unstated — being wrong that way costs throughput, and being wrong the
- * other way invites remote rate limiting.
+ * Defaults to `true` when unstated.
  */
 network: boolean, 
 /**
- * Can it move `HEAD` or create local history, so that `head_before` is
- * worth recording? Same source and same default, for the same reason:
- * an unnecessary `rev-parse` costs one subprocess.
+ * Can it move `HEAD` or create local history? Defaults to `true`
+ * when unstated.
  */
 mutating: boolean, } };

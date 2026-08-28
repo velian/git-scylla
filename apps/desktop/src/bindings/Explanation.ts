@@ -11,8 +11,5 @@ export type Explanation = { kind: FailureKind,
 remedy: string | null, 
 /**
  * The line from git that this was read off.
- *
- * Always carried, never replaced: an interpretation the user disagrees
- * with is only arguable if they can see what it was made from.
  */
 evidence: string, };
