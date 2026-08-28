@@ -1,13 +1,7 @@
-//! Where git-scylla keeps what has to outlive a process.
+//! State directory resolution and atomic JSON persistence.
 //!
-//! The CLI's last-run transcripts, the shell's configuration and the startup
-//! cache all need the same directory rule. Two of them had already spelled it
-//! out separately, byte for byte, while disagreeing about how to write a file.
-//! A rule each component spells for itself is one that ends up spelled three
-//! ways.
-//!
-//! Deliberately not in `core`: `core` is the domain and touches neither the
-//! filesystem nor the environment.
+//! `core` is the domain and touches neither the filesystem nor the
+//! environment; this crate does both.
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -16,14 +10,7 @@ use std::path::{Path, PathBuf};
 /// The state directory: `$GIT_SCYLLA_STATE_DIR`, else the macOS
 /// application-support directory.
 ///
-/// One variable for every consumer, on purpose. It is what keeps a test suite
-/// and a CI run out of the developer's real state, and someone who redirects it
-/// expects to have redirected all of it — a second variable, or a component
-/// that honoured none, would make that promise false in exactly the case where
-/// it matters.
-///
-/// `None` means `$HOME` is unset and there is nowhere to put anything, which
-/// callers treat as "this feature is unavailable" rather than as an error.
+/// `None` if `$HOME` is unset.
 pub fn dir() -> Option<PathBuf> {
     if let Some(d) = std::env::var_os("GIT_SCYLLA_STATE_DIR") {
         return Some(PathBuf::from(d));
@@ -47,12 +34,11 @@ pub enum StoreError {
     Encode(#[from] serde_json::Error),
 }
 
-/// Write `bytes` to `path`, creating the directory, without ever leaving a
-/// half-written file behind.
+/// Writes `bytes` to `path`, creating the parent directory if needed.
 ///
-/// Into a temporary in the same directory and renamed over the target, so an
-/// interrupted write cannot produce a file the next launch reads as corrupt.
-/// Same directory because a rename across filesystems is not atomic.
+/// Written to a temporary file in the same directory, then renamed into
+/// place. A rename across filesystems is not atomic, so the temporary must
+/// share the target's directory.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     let parent = path.parent().ok_or(StoreError::NoDirectory)?;
     std::fs::create_dir_all(parent)
@@ -63,12 +49,10 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
         .map_err(|source| StoreError::Io { path: path.to_path_buf(), source })
 }
 
-/// Read and deserialize one file from the state directory.
+/// Reads and deserializes one file from the state directory.
 ///
-/// `None` for every failure — missing, unreadable, malformed. A first launch
-/// has no state, and a corrupt file should leave the application usable rather
-/// than refusing to start; the distinction between the two is not one any
-/// caller here acts on differently, so it is not offered.
+/// Returns `None` for a missing, unreadable, or malformed file. A parse
+/// failure is logged; the other two are not.
 pub fn load_json<T: DeserializeOwned>(name: &str) -> Option<T> {
     let path = path(name)?;
     let bytes = std::fs::read(&path).ok()?;
@@ -91,8 +75,8 @@ pub fn save_json<T: Serialize>(name: &str, value: &T) -> Result<(), StoreError> 
 mod tests {
     use super::*;
 
-    /// The tests set `GIT_SCYLLA_STATE_DIR`, which is process-wide, so they run
-    /// under one lock rather than racing each other's directory.
+    /// `GIT_SCYLLA_STATE_DIR` is process-wide; tests share one lock to avoid
+    /// racing on it.
     static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn with_state_dir<T>(f: impl FnOnce(&Path) -> T) -> T {
@@ -122,8 +106,6 @@ mod tests {
 
     #[test]
     fn a_missing_or_corrupt_file_is_absent_rather_than_fatal() {
-        // Refusing to start because a state file is malformed would be a worse
-        // outcome than losing what it held.
         with_state_dir(|d| {
             assert_eq!(load_json::<Vec<u32>>("nothing.json"), None);
             std::fs::write(d.join("bad.json"), b"{ not json").unwrap();
@@ -137,16 +119,12 @@ mod tests {
             let roots = vec![PathBuf::from("/work")];
             Cache::new(roots.clone(), vec![], std::time::SystemTime::UNIX_EPOCH).save().unwrap();
             assert!(Cache::load_for(&roots).is_some());
-            // A different working set is not this window's.
             assert!(Cache::load_for(&[PathBuf::from("/elsewhere")]).is_none());
         });
     }
 
     #[test]
     fn a_cache_from_an_older_layout_is_discarded_rather_than_migrated() {
-        // It is re-derivable in under a second. Migration code for it would
-        // cost more than it could save, and a migration bug would present as
-        // wrong rows rather than as no rows.
         with_state_dir(|d| {
             let roots = vec![PathBuf::from("/work")];
             let mut cache = Cache::new(roots.clone(), vec![], std::time::SystemTime::UNIX_EPOCH);
@@ -173,33 +151,21 @@ mod tests {
     }
 }
 
-// ---- the startup cache --------------------------------------------------
-
-/// What a previous run knew, so a launch has rows before it has a scan.
+/// A previous run's repository snapshots, read before this run's scan
+/// completes.
 ///
-/// One JSON file. No SQLite: at fewer than a hundred repositories that is
-/// unearned complexity, and the whole file is rewritten anyway because what it
-/// mirrors serializes in a millisecond.
+/// One JSON file, rewritten in full on each save.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Cache {
     pub version: u32,
     #[serde(with = "git_scylla_core::serde_time")]
     pub written_at: std::time::SystemTime,
-    /// The roots this was written for. A cache written for a different working
-    /// set is not wrong, but it is not this window's, and presenting it would
-    /// show rows the user has since removed a root for.
     pub roots: Vec<PathBuf>,
-    /// Snapshots verbatim, `FetchHealth` and all: a quarantine that forgets
-    /// itself on restart is a retry loop with extra steps.
     pub repos: Vec<git_scylla_core::RepoSnapshot>,
 }
 
-/// Bumped whenever the shape of a snapshot changes.
-///
-/// A mismatch **discards**; there is deliberately no migration. The cache is a
-/// convenience whose entire content is re-derivable in under a second, so
-/// carrying migration code for it would cost more than it could ever save —
-/// and a migration bug would present as wrong rows rather than as no rows.
+/// Bumped when the shape of `Cache` changes. A mismatch makes `load_for`
+/// discard the cache.
 pub const CACHE_VERSION: u32 = 1;
 
 const CACHE_FILE: &str = "cache.json";
@@ -213,11 +179,10 @@ impl Cache {
         Self { version: CACHE_VERSION, written_at: at, roots, repos }
     }
 
-    /// The cache, if there is a loadable one for these roots.
+    /// The cache for these roots, if one is loadable.
     ///
-    /// `None` for missing, unreadable, malformed, a version mismatch, or a
-    /// different root set. Every one of those means "start from a scan", and no
-    /// caller does anything different about which.
+    /// `None` for a missing, unreadable, or malformed file, a version
+    /// mismatch, or a different root set.
     pub fn load_for(roots: &[PathBuf]) -> Option<Self> {
         let cache: Self = load_json(CACHE_FILE)?;
         if cache.version != CACHE_VERSION {
