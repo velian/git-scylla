@@ -1,21 +1,8 @@
-//! FSEvents → repository invalidations.
+//! Turns filesystem events into repository invalidations.
 //!
-//! The watcher's job is to say *which repository moved*, and nothing else. It
-//! never probes, never reads a snapshot and never decides whether a re-probe is
-//! allowed — the engine owns all three, and a watcher with a second opinion
-//! about engine state would be a second scheduler.
-//!
-//! Three layers, and the two that carry the rules are pure:
-//!
-//! * [`index`] answers "which repository does this path belong to" — a prefix
-//!   question, hence a sorted `Vec` and a binary search.
-//! * [`classify`] answers "does this path mean anything" — the rule that keeps
-//!   a fetch's thousands of loose objects from becoming a probe storm.
-//! * [`Pending`] accumulates a debounce window, so a save that touches forty
-//!   files is one invalidation.
-//!
-//! Only the `notify` wiring at the bottom needs a real filesystem, and it is
-//! deliberately thin for that reason.
+//! [`index::Index`] maps a changed path to a repository. [`classify`] judges
+//! whether a path matters. [`Pending`] accumulates a debounce window into
+//! [`Invalidation`] messages.
 
 pub mod classify;
 pub mod index;
@@ -30,39 +17,22 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// How long changes are gathered before being reported.
-///
-/// One editor save touches the file, a swap file and often an atomic-rename
-/// temporary; one `git commit` touches the index, two refs and a reflog. None
-/// of those deserves its own probe, and 300 ms is below the threshold at which
-/// a person reads the grid as lagging.
 pub const DEBOUNCE: Duration = Duration::from_millis(300);
 
 /// What the watcher asks the engine to do.
-///
-/// Never a snapshot: the watcher does not probe. Every variant is a request the
-/// engine is free to refuse — it holds the busy marker, and a repository with a
-/// job in flight must not be re-probed underneath it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Invalidation {
-    /// Re-probe these. Batched, because one debounce window usually covers one
-    /// repository but a `git pull` across a working set covers many.
+    /// Re-probe these repositories.
     Repos(Vec<RepoId>),
-    /// A `.git` appeared where no repository was known. Discover this subtree
-    /// rather than rescanning every root — cloning one repository should not
-    /// cost a walk of all of them.
+    /// A `.git` appeared with no known owner.
     Discover(PathBuf),
     /// These are gone from disk.
     Gone(Vec<RepoId>),
-    /// The backend lost history and cannot say what changed. Nothing held
-    /// locally can be trusted, so the only honest response is a full rescan.
+    /// The backend lost history. Rescan everything.
     Rescan,
 }
 
 /// One filesystem change, reduced to what this crate reasons about.
-///
-/// Its own type rather than `notify::Event` so that the fold below is testable
-/// without producing real filesystem events, and so that a backend that reports
-/// a kind this crate does not distinguish cannot leak that distinction inward.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observed {
     pub path: PathBuf,
@@ -76,9 +46,6 @@ impl Observed {
 }
 
 /// What one debounce window has gathered.
-///
-/// Sets, so that forty events in one repository are one invalidation and the
-/// order they arrived in cannot leak into the order they are reported.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Pending {
     repos: BTreeSet<RepoId>,
@@ -92,25 +59,19 @@ impl Pending {
         !self.rescan && self.repos.is_empty() && self.discover.is_empty() && self.gone.is_empty()
     }
 
-    /// A backend that lost history. Everything else gathered is moot.
+    /// A backend that lost history.
     pub fn must_rescan(&mut self) {
         *self = Self { rescan: true, ..Default::default() };
     }
 
     /// Fold one change into the window.
     ///
-    /// `exists` is a parameter rather than a call to [`Path::exists`] so the
-    /// disappearance rules stay a pure function of their inputs — the
-    /// alternative is a test that creates and deletes real directories to
-    /// assert a classification.
+    /// `exists` is injected so this stays pure and testable.
     pub fn absorb(&mut self, index: &Index, obs: &Observed, exists: &dyn Fn(&Path) -> bool) {
         if self.rescan {
             return;
         }
 
-        // Gone first: a path that no longer exists cannot be classified by what
-        // is inside it, and `rm -rf` of a directory holding four checkouts is
-        // one event that takes all four.
         let vanished = vanished(index, &obs.path, exists);
         if !vanished.is_empty() {
             self.gone.extend(vanished);
@@ -118,9 +79,6 @@ impl Pending {
         }
 
         let Some(owner) = index.owner(&obs.path) else {
-            // Under a root but inside no known repository. Only a `.git` is
-            // worth a discovery pass; anything else is somebody saving a note
-            // in a directory that is not a checkout.
             if let Some(root) = classify::repository_appearing(&obs.path) {
                 self.discover.insert(root);
             }
@@ -128,7 +86,7 @@ impl Pending {
         };
 
         let Ok(rel) = obs.path.strip_prefix(&owner.path) else {
-            // `owner` returned it, so it is a prefix. Unreachable.
+            // `owner` returned it, so it is a prefix.
             return;
         };
         if classify::verdict(rel, owner.bare, obs.change) == Verdict::Reprobe {
@@ -136,11 +94,7 @@ impl Pending {
         }
     }
 
-    /// Everything gathered, as the messages to send. Leaves the window empty.
-    ///
-    /// `Gone` precedes `Repos` so the engine drops a repository before being
-    /// asked to re-probe it; `Rescan` replaces everything, since a backend that
-    /// lost history has made the rest of the window meaningless.
+    /// Everything gathered, as messages to send. Leaves the window empty.
     pub fn drain(&mut self) -> Vec<Invalidation> {
         let taken = std::mem::take(self);
         if taken.rescan {
@@ -159,17 +113,10 @@ impl Pending {
 }
 
 /// Which repositories `path` going away would take with it.
-///
-/// Two shapes, and the second is easy to miss: a directory holding checkouts
-/// removed wholesale, and a repository whose `.git` was removed while the
-/// directory stayed. The second is no longer a repository even though its path
-/// still exists.
 fn vanished(index: &Index, path: &Path, exists: &dyn Fn(&Path) -> bool) -> Vec<RepoId> {
     let at_or_below: Vec<RepoId> = index.under(path).map(|w| w.id.clone()).collect();
     if !at_or_below.is_empty() {
-        // The existence check is what makes this robust to a backend that
-        // coalesced the removal into an event with no kind — FSEvents does,
-        // routinely — rather than trusting `Change::Removed` to have survived.
+        // Robust to backends that omit the removal's event kind.
         return if exists(path) { Vec::new() } else { at_or_below };
     }
     match index.owner(path) {
@@ -182,8 +129,6 @@ fn vanished(index: &Index, path: &Path, exists: &dyn Fn(&Path) -> bool) -> Vec<R
 fn is_git_dir_of(w: &Watched, path: &Path) -> bool {
     !w.bare && path.strip_prefix(&w.path).is_ok_and(|rel| rel == Path::new(".git"))
 }
-
-// ---- the notify wiring -------------------------------------------------
 
 #[derive(Debug, thiserror::Error)]
 pub enum WatchError {
@@ -218,14 +163,8 @@ impl Drop for Watcher {
 impl Watcher {
     /// Watch every root recursively, reporting to `tx`.
     ///
-    /// Recursive is not a cost decision to revisit: FSEvents is per-volume and
-    /// kernel-level, so a large tree is essentially free — unlike kqueue, which
-    /// would need a descriptor per file.
-    ///
-    /// The index starts empty, which means every event is unattributable until
-    /// [`Watcher::reindex`] is called on the first settled scan. That is the
-    /// right default: attributing paths to repositories the engine has not
-    /// finished discovering would ask it to re-probe rows it does not have.
+    /// FSEvents is per-volume and kernel-level; recursive watching is
+    /// inexpensive regardless of tree size.
     pub fn start(
         roots: &[PathBuf],
         tx: tokio::sync::mpsc::Sender<Invalidation>,
@@ -253,8 +192,8 @@ impl Watcher {
         let task = tokio::spawn(async move {
             let mut pending = Pending::default();
             let mut ticker = tokio::time::interval(debounce);
-            // A window that fills while the engine is busy must not then fire
-            // its backlog of ticks all at once.
+            // A window that fills while the engine is busy must not fire its
+            // backlog of ticks all at once.
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
@@ -280,20 +219,11 @@ impl Watcher {
     }
 
     /// Replace the path → repository index.
-    ///
-    /// Called when a scan settles. Rebuilt rather than mutated, because the set
-    /// it mirrors is rebuilt then too and an incrementally maintained copy
-    /// would be a second source of truth about which repositories exist.
     pub fn reindex(&self, repos: impl IntoIterator<Item = Watched>) {
         self.index_handle().replace(repos);
     }
 
     /// A handle to the index, detached from the watcher.
-    ///
-    /// Filling the index means asking the engine what it holds, which is
-    /// asynchronous — and a caller that keeps its watcher behind a
-    /// `std::sync::Mutex` must not hold that lock across the await. This is
-    /// what it holds instead.
     pub fn index_handle(&self) -> IndexHandle {
         IndexHandle(Arc::clone(&self.index))
     }
@@ -303,9 +233,7 @@ fn absorb_notify(pending: &mut Pending, index: &Mutex<Index>, res: notify::Resul
     let event = match res {
         Ok(e) => e,
         Err(e) => {
-            // A backend error is not something to swallow: the most likely one
-            // is a lost-history notification arriving as an error, and the
-            // honest response to "I cannot tell you what changed" is a rescan.
+            // A backend error most likely means lost history; rescan.
             tracing::warn!(%e, "watch backend error; rescanning");
             pending.must_rescan();
             return;
@@ -328,8 +256,7 @@ fn change_of(kind: &notify::EventKind) -> Change {
     match kind {
         EventKind::Create(_) | EventKind::Modify(_) => Change::Touched,
         EventKind::Remove(_) => Change::Removed,
-        // FSEvents coalesces, so `Any` is common and means exactly what it
-        // says. Every rule but `index.lock` treats it the same as a touch.
+        // FSEvents commonly reports `Any`; treated as `Unknown`.
         EventKind::Any | EventKind::Access(_) | EventKind::Other => Change::Unknown,
     }
 }
@@ -346,8 +273,6 @@ mod tests {
         Index::new([watched("/work/api", false), watched("/work/web", false)])
     }
 
-    /// Everything exists. The common case, and the one where disappearance
-    /// rules must stay out of the way.
     fn present(_: &Path) -> bool {
         true
     }
@@ -364,8 +289,6 @@ mod tests {
 
     #[test]
     fn a_window_of_forty_events_in_one_repository_is_one_invalidation() {
-        // An editor save touches the file, a swap file and a rename temporary;
-        // a commit touches the index, two refs and a reflog. One probe.
         let mut p = Pending::default();
         absorb(
             &mut p,
@@ -376,7 +299,6 @@ mod tests {
 
     #[test]
     fn a_fetch_writing_thousands_of_objects_produces_nothing() {
-        // The failure the watcher is most likely to cause.
         let mut p = Pending::default();
         absorb(
             &mut p,
@@ -417,8 +339,6 @@ mod tests {
 
     #[test]
     fn a_git_directory_appearing_asks_for_a_targeted_discovery() {
-        // Cloning a repository should make it appear without a walk of every
-        // root.
         let mut p = Pending::default();
         absorb(&mut p, &[touched("/work/fresh/.git/HEAD"), touched("/work/fresh/.git/config")]);
         assert_eq!(p.drain(), [Invalidation::Discover("/work/fresh".into())]);
@@ -453,7 +373,6 @@ mod tests {
 
     #[test]
     fn a_repository_whose_git_directory_went_is_gone_even_though_its_path_remains() {
-        // Still a directory. No longer a repository.
         let mut p = Pending::default();
         p.absorb(&index(), &Observed::new("/work/api/.git", Change::Removed), &|path| {
             path != Path::new("/work/api/.git")
@@ -463,14 +382,10 @@ mod tests {
 
     #[test]
     fn disappearance_rests_on_the_path_being_gone_rather_than_on_the_event_kind() {
-        // FSEvents coalesces, so a removal routinely arrives with no kind at
-        // all. Trusting `Change::Removed` to have survived would miss it.
         let mut p = Pending::default();
         p.absorb(&index(), &Observed::new("/work/api", Change::Unknown), &|_| false);
         assert_eq!(p.drain(), [Invalidation::Gone(vec![RepoId::from_canonical("/work/api")])]);
 
-        // ...and the converse: a `Removed` for a file inside a repository that
-        // still exists is an ordinary re-probe, not a disappearance.
         let mut p = Pending::default();
         p.absorb(&index(), &Observed::new("/work/api/a.txt", Change::Removed), &present);
         assert_eq!(p.drain(), [Invalidation::Repos(vec![RepoId::from_canonical("/work/api")])]);
@@ -478,8 +393,6 @@ mod tests {
 
     #[test]
     fn a_lost_history_notification_replaces_everything_in_the_window() {
-        // Nothing gathered before it can be trusted, and nothing gathered after
-        // it adds anything: the rescan already covers the working set.
         let mut p = Pending::default();
         absorb(&mut p, &[touched("/work/api/a.txt")]);
         p.must_rescan();
@@ -498,8 +411,6 @@ mod tests {
 
     #[test]
     fn a_repository_is_dropped_before_it_is_re_probed() {
-        // Ordering the engine depends on: asking it to re-probe a row it is
-        // about to drop is work it cannot use.
         let mut p = Pending::default();
         absorb(&mut p, &[touched("/work/web/a.txt")]);
         p.absorb(&index(), &Observed::new("/work/api", Change::Removed), &|_| false);
@@ -524,18 +435,11 @@ mod tests {
 
 #[cfg(test)]
 mod backend {
-    //! The `notify` wiring, against a real filesystem.
-    //!
-    //! Everything above is a pure function and is tested as one. This is the
-    //! one part that can only be exercised by making real changes on a real
-    //! volume, and it is thin precisely so that there is little here to be
-    //! wrong — but "little" is not "nothing", and untested it would be the
-    //! layer where a backend quirk hides.
+    //! The `notify` wiring, tested against a real filesystem.
 
     use super::*;
 
-    /// FSEvents coalesces and is not instant. Generous, because what is being
-    /// asserted is "the event arrives", not how fast.
+    /// FSEvents is not instant; generous timeout.
     const PATIENCE: Duration = Duration::from_secs(20);
 
     async fn next(rx: &mut tokio::sync::mpsc::Receiver<Invalidation>) -> Option<Invalidation> {
@@ -567,22 +471,18 @@ mod backend {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_repository_appearing_under_a_root_is_reported() {
-        // Cloning a repository has to make it appear without a full rescan.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-        // The index is empty, which is the state a watcher is in before its
-        // first scan settles — and the state in which a `.git` appearing is the
-        // only thing worth reporting.
         let _watcher =
             Watcher::start(std::slice::from_ref(&root), tx, Duration::from_millis(100)).unwrap();
 
         std::fs::create_dir_all(root.join("fresh/.git")).unwrap();
         std::fs::write(root.join("fresh/.git/HEAD"), "ref: refs/heads/main\n").unwrap();
 
-        // Other events may arrive first — the directory itself, for one — so
-        // this waits for the one it is about rather than assuming it is first.
+        // Other events may arrive first, so wait for the one this is about
+        // rather than assuming it is first.
         let deadline = std::time::Instant::now() + PATIENCE;
         while std::time::Instant::now() < deadline {
             match next(&mut rx).await {
@@ -615,9 +515,8 @@ mod backend {
         drop(watcher);
 
         std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
-        // The sender is dropped with the watcher, so the channel closes rather
-        // than merely going quiet — which is the difference between a stopped
-        // watcher and a slow one.
+        // The sender drops with the watcher, so the channel closes rather
+        // than merely going quiet.
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert!(matches!(tokio::time::timeout(Duration::from_secs(2), rx.recv()).await, Ok(None)));
     }
