@@ -1,10 +1,6 @@
-//! Build the fixture set into a directory and print what it contains.
+//! Builds the fixture set into a directory and prints what it contains.
 //!
 //! `cargo run -p git-scylla-testkit --bin gen -- /tmp/fixtures`
-//!
-//! For manual poking, and for the first pass of writing an expectation: run it,
-//! look at the repositories, then encode what git actually produced rather than
-//! what one assumed it would.
 
 use git_scylla_testkit::FixtureSet;
 

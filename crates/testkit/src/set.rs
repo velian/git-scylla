@@ -17,8 +17,7 @@ pub struct Fixture {
 pub struct FixtureSet {
     /// The directory everything was built in.
     pub dir: PathBuf,
-    /// The directory tests should scan. Excludes `origins/` and `scratch/`, so
-    /// the discovered set is exactly the fixtures.
+    /// The directory tests should scan. Excludes `origins/` and `scratch/`.
     pub scan_root: PathBuf,
     pub fixtures: Vec<Fixture>,
 }
@@ -59,9 +58,8 @@ impl Builder {
             })
         };
         mkdir(dir)?;
-        // Canonicalize once: on macOS a temp dir is `/var/...` which is a
-        // symlink to `/private/var/...`, and RepoId canonicalizes, so an
-        // uncanonicalized expectation would never match.
+        // macOS temp dirs are symlinks (`/var` -> `/private/var`); RepoId
+        // canonicalizes, so the expectation must too.
         let dir = dir.canonicalize().map_err(|e| GitError {
             args: vec!["canonicalize".into()],
             cwd: dir.to_path_buf(),
@@ -113,10 +111,8 @@ impl Builder {
         })
     }
 
-    /// A bare repository with one commit in it, to act as `origin`.
-    ///
-    /// Local, so the whole suite needs no network. It lives in
-    /// `origins/`, outside the scan root, so it is not itself discovered.
+    /// A bare repository with one commit, to act as `origin`. Lives in
+    /// `origins/`, outside the scan root.
     fn origin_with_commit(&self, name: &str) -> Result<PathBuf, GitError> {
         let bare = format!("{name}.git");
         self.g.run(&self.origins, &["init", "--bare", &bare])?;
@@ -162,7 +158,6 @@ impl Builder {
 
     /// Repository shapes.
     fn shapes(&mut self) -> Result<(), GitError> {
-        // The baseline every other expectation is a delta from.
         let p = self.init("clean")?;
         self.commit(&p, "a.txt", "a\n", "c1")?;
         self.push("clean", p, Expect::default());
@@ -171,8 +166,7 @@ impl Builder {
         let p = self.init("unborn")?;
         self.push("unborn", p, Expect { head: Head::Unborn("main".into()), ..Default::default() });
 
-        // Bare: no worktree, so working-tree state is meaningless rather than
-        // clean, and `git status` is never run there at all.
+        // Bare: no worktree; `work` is not meaningful here.
         self.g.run(&self.repos, &["init", "--bare", "bare.git"])?;
         self.push(
             "bare",
@@ -184,12 +178,7 @@ impl Builder {
             },
         );
 
-        // Bare with commits, and with its refs packed — which is what a real
-        // mirror looks like, since `git gc` packs them and `git clone --mirror`
-        // arrives that way. The `bare` fixture above cannot stand in for it:
-        // an empty `git init --bare` is genuinely unborn, so a probe that only
-        // ever looked for a *loose* ref file passed against it while reporting
-        // every populated mirror as unborn too.
+        // Bare with commits and packed refs: what `git clone --mirror` produces.
         self.g.run(&self.repos, &["init", "--bare", "bare-packed.git"])?;
         let packed = self.repos.join("bare-packed.git");
         let seed = self.scratch.join("bare-packed");
@@ -247,12 +236,7 @@ impl Builder {
         self.g.run(&sup, &["submodule", "add", path_str(&sub_origin), "sub"])?;
         self.g.run(&sup, &["commit", "-m", "add submodule"])?;
         self.push("submodule-super", sup.clone(), Expect::default());
-        // Nested-only, and not by accident: a submodule lives inside its
-        // superproject's worktree, so prune-on-match hides it from a default
-        // scan exactly as it hides any other nested repository. That is the
-        // right default for a bulk tool — "pull everything" should not
-        // independently pull the submodules out from under their pins — and
-        // `--nested` is how you ask for them.
+        // Nested-only: a submodule lives inside its superproject's worktree.
         self.push_nested(
             "submodule-sub",
             sup.join("sub"),
@@ -291,8 +275,7 @@ impl Builder {
         let p = self.clone_from(&o, "in-sync")?;
         self.push("in-sync", p, tracked(sync(0, 0)));
 
-        // A remote is configured but this branch tracks nothing. Distinct from
-        // in-sync, and the grid must not conflate them.
+        // A remote is configured but this branch tracks nothing.
         let o = self.origin_with_commit("no-upstream")?;
         let p = self.init("no-upstream")?;
         self.commit(&p, "a.txt", "a\n", "c1")?;
@@ -304,8 +287,7 @@ impl Builder {
         self.commit(&p, "local.txt", "local\n", "local c1")?;
         self.push("ahead", p, tracked(sync(1, 0)));
 
-        // "behind" only exists relative to a fetch: advance origin, then fetch
-        // once.
+        // Behind only exists relative to a fetch: advance origin, then fetch.
         let o = self.origin_with_commit("behind")?;
         let p = self.clone_from(&o, "behind")?;
         self.advance_origin("behind", 2)?;
@@ -319,9 +301,8 @@ impl Builder {
         self.g.run(&p, &["fetch"])?;
         self.push("diverged", p, tracked(sync(1, 1)));
 
-        // Upstream configured, remote-tracking ref deleted. git then omits
-        // `# branch.ab` entirely, which is the only signal that this is not
-        // "in sync".
+        // Upstream configured, remote-tracking ref deleted. git omits
+        // `# branch.ab` entirely — the only signal this is not "in sync".
         let o = self.origin_with_commit("upstream-gone")?;
         let p = self.clone_from(&o, "upstream-gone")?;
         self.g.run(&p, &["update-ref", "-d", "refs/remotes/origin/main"])?;
@@ -331,13 +312,6 @@ impl Builder {
             tracked(UpstreamExpect::Gone { remote: "origin", remote_ref: "origin/main".into() }),
         );
 
-        // Combinations of an upstream with a dirty worktree.
-        //
-        // These exist for the preconditions, not for the probe. Every other
-        // fixture varies one axis, which is right for the status parser — but a
-        // precondition lives on the *intersection*: "behind and dirty" is what
-        // decides whether a bulk pull touches uncommitted work. Without these,
-        // deleting the clean-worktree rule leaves every test passing.
         let o = self.origin_with_commit("behind-dirty")?;
         let p = self.clone_from(&o, "behind-dirty")?;
         self.advance_origin("behind-dirty", 2)?;
@@ -355,10 +329,7 @@ impl Builder {
             },
         );
 
-        // Behind with only an *untracked* file. Separate from the above because
-        // it is the case where the clean requirement is most arguable: git would
-        // happily pull, and the tool refuses. Having it in the table makes that
-        // threshold visible rather than incidental.
+        // Behind with only an untracked file, not a modification.
         let o = self.origin_with_commit("behind-untracked")?;
         let p = self.clone_from(&o, "behind-untracked")?;
         self.advance_origin("behind-untracked", 2)?;
@@ -376,8 +347,6 @@ impl Builder {
             },
         );
 
-        // Ahead and dirty: the case that proves push does *not* care about
-        // worktree state while pull does.
         let o = self.origin_with_commit("ahead-dirty")?;
         let p = self.clone_from(&o, "ahead-dirty")?;
         self.commit(&p, "local.txt", "local\n", "local c1")?;
@@ -433,8 +402,7 @@ impl Builder {
             Expect { work: WorkTree { staged: 1, ..Default::default() }, ..Default::default() },
         );
 
-        // One path, both sides of the index. The case that makes WorkTree a
-        // struct of counts rather than a state.
+        // One path, both sides of the index.
         let p = self.init("staged-and-modified")?;
         self.commit(&p, "a.txt", "a\n", "c1")?;
         self.write(&p, "a.txt", "staged\n")?;
@@ -449,9 +417,7 @@ impl Builder {
             },
         );
 
-        // A rename produces a type-2 record, which occupies two NUL-separated
-        // fields. Exercised here against real git output, not just the parser
-        // unit tests.
+        // A rename produces a type-2 record, occupying two NUL-separated fields.
         let p = self.init("renamed")?;
         self.commit(&p, "a.txt", "content\n", "c1")?;
         self.g.run(&p, &["mv", "a.txt", "b.txt"])?;
@@ -461,15 +427,10 @@ impl Builder {
             Expect { work: WorkTree { staged: 1, ..Default::default() }, ..Default::default() },
         );
 
-        // Adversarial filenames. The newline is the important one: it is what a
-        // line-oriented status parser gets wrong, and with `-z` git does not
-        // quote it either.
-        //
-        // **Not** covered here: a filename containing non-UTF-8 bytes. APFS and
-        // HFS+ reject them outright (EILSEQ), so the state cannot exist on the
-        // only platform this tool targets. The parser is tested against those
-        // bytes directly instead, in `probe::porcelain`, which is where the
-        // behaviour actually lives.
+        // Adversarial filenames. A newline is what a line-oriented status parser
+        // gets wrong; git does not quote it even with `-z`. Non-UTF-8 names are
+        // not covered — the filesystem rejects them — and are tested directly
+        // in `probe::porcelain` instead.
         let p = self.init("awkward-names")?;
         self.commit(&p, "a.txt", "a\n", "c1")?;
         self.write(&p, "with space.txt", "x\n")?;
@@ -489,10 +450,8 @@ impl Builder {
         Ok(())
     }
 
-    /// Half-finished operations.
-    ///
-    /// Every one is built by running a git command that *fails*, which is the
-    /// only honest way to reach these states.
+    /// Half-finished operations, each reached by running a git command that
+    /// fails or stops mid-way.
     fn in_progress(&mut self) -> Result<(), GitError> {
         // Two branches editing the same line, so any of these conflicts.
         let diverge = |b: &Builder, p: &Path| -> Result<(), GitError> {

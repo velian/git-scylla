@@ -10,18 +10,8 @@ pub struct GitError {
     pub stderr: String,
 }
 
-/// A `git` invoker pinned hard enough that fixtures are byte-reproducible.
-///
-/// Every one of these matters, and leaving any of them out makes the fixture
-/// suite depend on the machine that runs it:
-///
-/// * `GIT_CONFIG_GLOBAL` / `SYSTEM` / `NOSYSTEM` and a scratch `HOME` — a
-///   developer with `init.defaultBranch = trunk`, a global `core.excludesFile`,
-///   or `commit.gpgsign = true` must not change what the fixtures contain.
-/// * fixed author *and* committer identity and dates — otherwise every object
-///   id differs per machine and per run.
-/// * `protocol.file.allow` — git 2.38 refuses local-path submodules by default,
-///   and the submodule fixture is built from a bare repository on disk.
+/// A `git` invoker with environment and config pinned for byte-reproducible
+/// fixtures across machines and runs.
 pub struct Git {
     home: PathBuf,
 }
@@ -29,7 +19,6 @@ pub struct Git {
 const DATE: &str = "2024-01-01T00:00:00+00:00";
 
 impl Git {
-    /// `home` is a scratch directory used only to shadow the real one.
     pub fn new(home: impl Into<PathBuf>) -> Self {
         Self { home: home.into() }
     }
@@ -87,11 +76,7 @@ impl Git {
         }
     }
 
-    /// Run a command that is *expected* to fail, and say so.
-    ///
-    /// Half the interesting fixtures are made by a failing git command: a
-    /// conflicting merge, a rebase that stops. Treating those as errors would
-    /// make the generator unable to build the states that matter most.
+    /// Succeeds only if `args` fails.
     pub fn run_expect_failure(&self, cwd: &Path, args: &[&str]) -> Result<(), GitError> {
         match self.run(cwd, args) {
             Ok(_) => Err(GitError {

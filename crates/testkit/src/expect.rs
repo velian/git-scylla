@@ -5,18 +5,15 @@ use serde_json::{json, Value};
 
 /// What a fixture's snapshot must look like.
 ///
-/// Not a bare `RepoSnapshot`, for one reason: three of a snapshot's fields
-/// cannot be predicted by a generator — the probe time, the mtime behind
-/// `last_fetch`, and the clock inside `FetchSchedule::Due`. Every other field is
-/// asserted exactly. See [`normalize`], which is what makes the comparison a
-/// JSON equality rather than a hand-written field-by-field walk.
+/// Omits `probed_at`, `last_fetch`, and the clock inside `FetchSchedule::Due`.
+/// Every other field is asserted exactly. See [`normalize`].
 #[derive(Debug, Clone)]
 pub struct Expect {
     pub kind: RepoKind,
     pub head: Head,
     pub upstream: UpstreamExpect,
-    /// Remote names, in config order. Hosts are asserted separately because
-    /// every fixture remote is a local path and so has no host.
+    /// Remote names, in config order. Every fixture remote is a local path,
+    /// so hosts are not asserted here.
     pub remotes: Vec<String>,
     pub work: WorkTree,
     pub op: Option<InProgress>,
@@ -43,8 +40,7 @@ impl Default for Expect {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpstreamExpect {
-    /// No upstream configured. Distinct from `Sync(0, 0)` — see the note on
-    /// [`git_scylla_core::Upstream::sync`].
+    /// No upstream configured. Distinct from `Sync(0, 0)`.
     None,
     /// Configured, tracking ref resolvable.
     Sync { remote: &'static str, remote_ref: String, ahead: u32, behind: u32 },
@@ -56,7 +52,7 @@ pub enum UpstreamExpect {
 pub enum FetchExpect {
     /// No remote to fetch from.
     Disabled,
-    /// A remote exists, so the fetch scheduler picks it up.
+    /// A remote exists.
     Due,
 }
 
@@ -93,13 +89,10 @@ impl Expect {
     }
 }
 
-/// Project a real snapshot into the comparable shape.
+/// Project a real snapshot into the shape [`Expect::to_json`] produces.
 ///
-/// Everything volatile is dropped rather than approximated: `probed_at` is
-/// gone, `last_fetch` is gone (its *presence* is not asserted, because
-/// `FETCH_HEAD` exists or not depending on whether git chose to write it during
-/// a clone, which is not our business), and `FetchSchedule::Due(t)` collapses to
-/// `"due"`. What remains is asserted exactly, including remote *order*.
+/// Drops `probed_at` and `last_fetch`; collapses `FetchSchedule::Due(t)` to
+/// `"due"`. Remote order is preserved and asserted.
 pub fn normalize(name: &str, s: &RepoSnapshot) -> Value {
     json!({
         "name": name,
