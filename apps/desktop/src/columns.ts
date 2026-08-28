@@ -1,13 +1,7 @@
 /**
- * Column ordering for the repository grid, and the two columns derived from a
- * path.
- *
- * Deliberately thin. Anything that decides what a repository *is* — its badge,
- * whether an action may run on it, whether an expression matches — happens in
- * Rust and arrives here already decided, and so does anything that *phrases*
- * one: the status column and the fetch cell are projected by `row.rs` as
- * `status` and `fetch_cell`, because the CLI renders the same two and a second
- * implementation of either is a second thing to be wrong.
+ * Column ordering for the repository grid, and the two columns derived from
+ * a path. Anything that decides what a repository *is* arrives already
+ * decided from Rust; `status` and `fetch_cell` are projected by `row.rs`.
  */
 import type { RepoRow } from "./bindings";
 
@@ -26,13 +20,7 @@ export function relativePath(row: RepoRow, roots: string[]): string {
   return relativeTo(row.path, roots);
 }
 
-/**
- * Path relative to the longest root that contains it, else the whole path.
- *
- * Takes a path rather than a row because the plan sheet has only
- * [`RepoId`]s — and a `RepoId` *is* the canonicalized path, so nothing is
- * lost. Everything else about a repository still needs the row.
- */
+/** Path relative to the longest root that contains it, else the whole path. */
 export function relativeTo(path: string, roots: string[]): string {
   let best = "";
   for (const root of roots) {
@@ -71,8 +59,6 @@ export function compare(a: RepoRow, b: RepoRow, key: SortKey, dir: SortDir): num
   const sign = dir === "asc" ? 1 : -1;
   const byPath = a.path.localeCompare(b.path);
   switch (key) {
-    // `badgeRank` comes from Rust because the ordering is the declaration order
-    // of the Badge enum, which a TypeScript string union cannot express.
     case "badge":
       return sign * (a.badge_rank - b.badge_rank || byPath);
     case "name":

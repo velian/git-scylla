@@ -1,10 +1,4 @@
-/**
- * The scan fold.
- *
- * Every case here is one that shipped broken at some point, which is the reason
- * the fold was pulled out of the hook to be testable at all: three of these
- * were found by reading rather than by running, and reading is not a method.
- */
+/** Tests the scan fold. */
 import { describe, expect, it } from "vitest";
 import { EMPTY, fold, isCurrentScan, type ScanState } from "./useScan";
 import type { DiscoveryError, RepoRow, ScanId, UiEvent } from "./bindings";
@@ -48,8 +42,8 @@ function scanning(): ScanState {
 
 describe("isCurrentScan", () => {
   it("adopts anything when nothing is being shown yet", () => {
-    // The `startScan` reply and that scan's first events race across the IPC.
-    // Whichever arrives first has to be accepted.
+    // The `startScan` reply and that scan's first events race across IPC;
+    // whichever arrives first is accepted.
     expect(isCurrentScan(null, 1)).toBe(true);
     expect(isCurrentScan(null, 9)).toBe(true);
   });
@@ -65,7 +59,6 @@ describe("isCurrentScan", () => {
 
 describe("fold", () => {
   it("returns the same state when nothing in the tick concerned it", () => {
-    // A batch running while nothing is scanning must not re-render the grid.
     const before = scanning();
     const after = fold(before, [
       { type: "BatchDone", value: { id: 1, summary: {}, line: "" } } as unknown as UiEvent,
@@ -87,15 +80,12 @@ describe("fold", () => {
   });
 
   it("treats progress as evidence that a scan is running", () => {
-    // What lets the Lagged arm clear the scan state rather than guess at it.
     const state = fold({ ...EMPTY, showing: 1 }, [progress(1, 2, 1)]);
     expect(state.scanning).toBe(true);
   });
 
-  // The bug this file exists for. Adding a root mid-scan starts a second one,
-  // and the first one's completion used to end the second.
   it("ignores a superseded scan's progress and completion", () => {
-    // Scan 2 has taken over — the user added a root while scan 1 was walking.
+    // Scan 2 has taken over — a root was added while scan 1 was walking.
     const state = fold(scanning(), [progress(2, 40, 4)]);
     expect(state).toMatchObject({ showing: 2, progress: { found: 40, probed: 4 } });
 
@@ -112,12 +102,11 @@ describe("fold", () => {
   });
 
   it("adopts a scan first heard of through its events", () => {
-    // The reply lost the race. Its id is not older, so it is the current one.
+    // The reply lost the race; its id is not older, so it is the current one.
     const state = fold(EMPTY, [done(7, [UNREADABLE])]);
     expect(state).toMatchObject({ showing: 7, errors: [UNREADABLE] });
   });
 
-  // The other bug: a dropped ScanDone left the progress bar up until relaunch.
   it("clears the scan state when events are dropped", () => {
     const state = fold(scanning(), [LAGGED]);
     expect(state).toMatchObject({ scanning: false, progress: null, lagged: 1 });
@@ -126,7 +115,6 @@ describe("fold", () => {
   it("lets a scan that is still running re-establish itself after a drop", () => {
     const state = fold(fold(scanning(), [LAGGED]), [progress(1, 5, 4)]);
     expect(state).toMatchObject({ scanning: true, progress: { found: 5, probed: 4 } });
-    // The counter does not reset: an accumulated transcript still has a hole.
     expect(state.lagged).toBe(1);
   });
 
@@ -135,16 +123,11 @@ describe("fold", () => {
   });
 
   it("drops rows for repositories that went away", () => {
-    // A row for a directory the user deleted is worse than no row.
     const state = fold(EMPTY, [rows("/a", "/b", "/c"), removed("/b")]);
     expect(state.repos.map((r) => r.path)).toEqual(["/a", "/c"]);
   });
 
   it("takes the last word within a tick, in either direction", () => {
-    // Events inside one tick are ordered, so the newest fact about a repository
-    // wins whichever way round it is: removed after a read means gone, and read
-    // after a removal means back. The Rust side has to preserve that ordering
-    // when it coalesces, which is why it flushes upserts around a removal.
     expect(fold(EMPTY, [rows("/a"), removed("/a")]).repos).toEqual([]);
     expect(fold(EMPTY, [rows("/a"), removed("/a"), rows("/a")]).repos.map((r) => r.path)).toEqual([
       "/a",
@@ -152,7 +135,6 @@ describe("fold", () => {
   });
 
   it("applies a whole tick in order", () => {
-    // The listener hands over one array per 50 ms tick, not one event at a time.
     const state = fold(EMPTY, [rows("/a"), progress(1, 2, 1), rows("/b"), done(1)]);
     expect(state.repos.map((r) => r.path)).toEqual(["/a", "/b"]);
     expect(state.scanning).toBe(false);

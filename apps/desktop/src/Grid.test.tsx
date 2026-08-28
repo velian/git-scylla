@@ -2,20 +2,7 @@
  * @vitest-environment jsdom
  */
 
-/**
- * The grid's click handling.
- *
- * Three bugs lived here at once, and none of them was visible in the handler
- * that caused it: a context menu that outlived its dismissal and covered the
- * rows beneath, a checkbox wired to nothing, and a first click that scrolled the
- * list out from under the pointer. All three are about what a click *reaches*,
- * which is why they are tested through rendered DOM and real event sequences
- * rather than by calling the handlers.
- *
- * jsdom does no layout, so scroll positions cannot be asserted here. The cause
- * can: `scrollIntoView` is stubbed and the rows it is called on are recorded,
- * which is the thing that was wrong.
- */
+/** Tests the grid's click, keyboard, and context-menu handling, through rendered DOM and real event sequences. */
 import { useState } from "react";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -23,9 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Grid, type Sort } from "./Grid";
 import type { RepoId, RepoRow } from "./bindings";
 
-// The row menu hands off and re-probes through this. Nothing here exercises
-// those, and the real client reaches for Tauri internals that do not exist
-// under jsdom.
+// The real client reaches for Tauri internals that do not exist under jsdom.
 vi.mock("./engine/client", () => ({
   engine: {
     handOff: vi.fn().mockResolvedValue(undefined),
@@ -94,9 +79,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  // Explicit: testing-library only registers its own cleanup when the test
-  // framework's globals are injected, and vitest is not configured to.
-  // Without this every render stacks up in one body and queries match twice.
   cleanup();
   vi.clearAllMocks();
 });
@@ -113,9 +95,6 @@ const selectedNames = () =>
 
 describe("selecting rows", () => {
   it("adds to the selection when a row's checkbox is ticked", async () => {
-    // The checkbox was inert: `onChange` did nothing and `onClick` stopped the
-    // row handler, so neither acted. Ticking one must add exactly one
-    // repository and leave the rest of the selection alone.
     const user = userEvent.setup();
     render(<Harness />);
 
@@ -125,14 +104,11 @@ describe("selecting rows", () => {
     await user.click(within(rowFor("charlie")).getByRole("checkbox"));
     expect(selectedNames()).toEqual(["alpha", "charlie"]);
 
-    // And untick, since a checkbox that only adds is half a control.
     await user.click(within(rowFor("alpha")).getByRole("checkbox"));
     expect(selectedNames()).toEqual(["charlie"]);
   });
 
   it("replaces the selection when the row itself is clicked", async () => {
-    // The contrast the checkbox exists for. A plain click is "just this one",
-    // and making the box toggle must not have made the row toggle too.
     const user = userEvent.setup();
     render(<Harness />);
 
@@ -146,11 +122,6 @@ describe("selecting rows", () => {
 
 describe("the keyboard cursor", () => {
   it("does not travel through the first row on the first click", async () => {
-    // Focusing the grid defaults the cursor to the first row so Tab has
-    // somewhere to start. A click focuses it too, and then moves the cursor to
-    // the row it landed on — so the cursor briefly sat on row one, and the
-    // `scrollIntoView` that keeps it visible dragged the list to the top and
-    // back. Only ever the first click, because afterwards the cursor is set.
     const user = userEvent.setup();
     render(<Harness />);
 
@@ -161,8 +132,6 @@ describe("the keyboard cursor", () => {
   });
 
   it("still starts at the first row when the grid is reached by Tab", async () => {
-    // The other half: the default is what makes keyboard focus visible, and
-    // skipping it for pointer focus must not have removed it for Tab.
     const user = userEvent.setup();
     render(<Harness />);
 
@@ -180,10 +149,6 @@ describe("the row context menu", () => {
   };
 
   it("closes on a click outside the grid", async () => {
-    // It is `position: fixed` and opaque, and its own click handler stops
-    // propagation — so a menu left open sits over the rows beneath it and eats
-    // their clicks. Every way of stranding it is a click somewhere the grid
-    // cannot see: the toolbar, the sidebar, Clear.
     const user = userEvent.setup();
     render(<Harness />);
     await openMenu(user, "bravo");
@@ -204,7 +169,6 @@ describe("the row context menu", () => {
   });
 
   it("stays open for a click on itself", async () => {
-    // The dismissal must not be so eager that the menu cannot be used.
     const user = userEvent.setup();
     render(<Harness />);
     await openMenu(user, "bravo");

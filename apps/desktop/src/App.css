@@ -1,11 +1,5 @@
-/*
- * The shell's own styling. Deliberately small: it is the chrome the grid, the
- * action bar and the drawer sit inside, not their internals.
- *
- * Colours are tokens defined once for light and overridden once for dark. The
- * window has no `theme` in tauri.conf.json, so macOS decides, and
- * `prefers-color-scheme` is what carries that decision into the webview.
- */
+/* The shell's chrome: layout around the grid, action bar, and drawer. Colours
+ * are tokens, overridden once for `prefers-color-scheme: dark`. */
 
 :root {
   --bg: #fbfbfd;
@@ -14,8 +8,7 @@
   --line: #d8d8dd;
   --accent: #0a84ff;
 
-  /* The title bar is Overlay, so content runs underneath it. This is the
-   * height the traffic lights need cleared — see trafficLightPosition. */
+  /* Overlay title bar: content runs underneath it, so this is cleared explicitly. */
   --titlebar-h: 44px;
 
   color-scheme: light dark;
@@ -45,8 +38,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* Drags the window by the empty part of the title bar, which an Overlay title
- * bar does not give you for free. */
+/* Drags the window; an Overlay title bar does not give this for free. */
 .titlebar {
   height: var(--titlebar-h);
   display: flex;
@@ -214,8 +206,6 @@ p {
   white-space: pre-wrap;
 }
 
-/* The Full Disk Access hint. Deliberately prominent: it is the difference
- * between a tool that looks broken and one that says what to do. */
 .hint {
   border: 1px solid var(--line);
   border-left: 3px solid #ff9f0a;
@@ -380,9 +370,7 @@ p {
   border: 1px solid currentColor;
 }
 
-/* Cached rows, not yet re-read this session. Dimmed rather than hidden — they
-   are useful, and the scan that confirms them is a second away — but never
-   rendered as though they had been verified. */
+/* Cached rows, not yet re-read this session: dimmed, never shown as verified. */
 tbody tr.is-stale { opacity: 0.55; }
 .stale-mark {
   margin-left: 0.5em;
@@ -439,9 +427,6 @@ tbody tr.is-stale { opacity: 0.55; }
   align-items: center;
   gap: 8px;
   margin-bottom: 12px;
-  /* Wraps rather than clipping. At seven controls and an 800 px window the
-     buttons no longer fit on one row, and a greyed-out button whose explanation
-     has been pushed off the right edge reads as a broken one. */
   flex-wrap: wrap;
 }
 
@@ -467,8 +452,7 @@ tbody tr.is-stale { opacity: 0.55; }
   position: relative;
 }
 
-/* The grid's context menu is `position: fixed` at the pointer; this one hangs
- * off its button, so it has to be positioned against the split container. */
+/* Positioned against the split container, unlike the grid's context menu, which is fixed at the pointer. */
 .actionbar__split .menu {
   position: absolute;
   top: calc(100% + 4px);
@@ -515,12 +499,9 @@ tbody tr.is-stale { opacity: 0.55; }
   margin: 16px 0;
 }
 
-/* Monospaced so the counts line up the way they do in the CLI. The sheet is
- * meant to be recognisable as the same plan, not merely to contain it. */
 .planrow > summary {
   display: grid;
-  /* The phrase column is fixed at the width `Plan::render` pads to, so the
-     details line up down the sheet exactly as they do in the CLI. */
+  /* Fixed at the width `Plan::render` pads to, so columns line up as they do in the CLI. */
   grid-template-columns: 1em 1.5em 3ch 15ch 1fr;
   gap: 8px;
   align-items: baseline;
@@ -808,8 +789,7 @@ tbody tr.is-stale { opacity: 0.55; }
   color: var(--fg-dim);
 }
 
-/* The spinner column is always there, so a row does not shift left when it
- * stops running. */
+/* Always present, so a row does not shift left when it stops running. */
 .jobrow__spinner {
   width: 10px;
   height: 10px;
@@ -889,8 +869,7 @@ tbody tr.is-stale { opacity: 0.55; }
   color: #ff9f0a;
 }
 
-/* Notices are git-scylla's own words in a transcript of git's — the distinction
- * matters when reading what actually happened. */
+/* Notices are git-scylla's own words in a transcript of git's. */
 .transcript__line--notice .transcript__text {
   color: var(--fg-dim);
   font-style: italic;
@@ -898,8 +877,7 @@ tbody tr.is-stale { opacity: 0.55; }
 
 /* --- keyboard and scan progress --- */
 
-/* The grid takes focus so arrow keys mean "move down a row" here and nothing
- * anywhere else. Its own outline is suppressed; the cursor row carries it. */
+/* The grid's own outline is suppressed; the cursor row carries it instead. */
 .grid:focus {
   outline: none;
 }
@@ -987,10 +965,7 @@ tbody tr.is-stale { opacity: 0.55; }
   margin-top: 0.75rem;
 }
 
-/* Danger is reserved for the genuinely irreversible — a force-with-lease push
-   and a custom command. Everything else stays neutral, so the distinction
-   keeps its meaning: styling that shows up on ordinary work is wallpaper
-   within a week, and then it is not there on the day it matters. */
+/* Reserved for the genuinely irreversible: a force-with-lease push, a custom command. */
 .menu__danger {
   color: #ff453a;
 }
@@ -1016,8 +991,7 @@ button.primary:disabled {
   opacity: 0.4;
 }
 
-/* Not danger styling: a fact about the working set the user should read before
-   confirming, which is a different thing from an irreversible action. */
+/* Not danger styling: a fact about the working set, not an irreversible action. */
 .sheet__warning {
   margin: 0.75rem 0 0;
   padding: 0.5rem 0.75rem;

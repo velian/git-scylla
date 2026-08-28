@@ -1,13 +1,8 @@
 /**
- * The confirmation sheet.
- *
- * The rule this file exists to obey: **it composes no prose of its own.** Every
- * headline, phrase, reason and button label arrives in the `PlanView` from
- * `crates/engine`, which is the same object the CLI renders as text. If this
- * file phrased anything itself, the two surfaces would be free to disagree.
- *
- * What it does decide is layout — a modal, disclosure triangles, which control
- * has focus — because none of that is a claim about what will happen.
+ * The confirmation sheet. Composes no prose of its own — headline, phrase,
+ * reason, and button labels all arrive in the `PlanView` from
+ * `crates/engine`, the same object the CLI renders as text. This file
+ * decides layout only: modal, disclosure triangles, which control has focus.
  */
 import { useEffect, useRef, useState } from "react";
 import { relativeTo } from "./columns";
@@ -32,34 +27,23 @@ export function PlanSheet({
   const [supplied, setSupplied] = useState<GuardInput>(NOTHING_SUPPLIED);
   const ready = satisfied(guard, supplied);
 
-  // `showModal` rather than an overlay div, for the modality and the focus
-  // containment. Not for Escape — see below.
   useEffect(() => {
     const el = dialog.current;
     if (el && !el.open) el.showModal();
-    // Focused here rather than with `autoFocus`, which does not survive:
     // `showModal` runs its own focusing steps after mount and lands on the
-    // first focusable thing in the sheet — one of the disclosure rows. Verified
-    // by reading `document.activeElement` with the sheet open. Cancel takes
-    // focus instead, so a stray Return dismisses rather than executes.
+    // first focusable element in the sheet; Cancel is focused explicitly
+    // afterward so a stray Return dismisses rather than executes.
     cancel.current?.focus();
   }, []);
 
-  // Escape, handled here rather than left to the dialog's own close request.
-  //
-  // Measured, not assumed: with the sheet open, Escape produced a `keydown` on
-  // the dialog and no `cancel` or `close` at all, and calling `close()` by hand
-  // closed the element while React went on holding the sheet in state. Either
-  // half is a bug — an invisible sheet that still owns the app, or a sheet that
-  // ignores Escape — and the app ships on WKWebView, which is not the engine
-  // that was measured. Owning the key makes all three engines agree.
+  // The dialog element's own Escape handling is unreliable across the
+  // engines this ships on, so Escape is owned here: prevented and stopped so
+  // the window-level handler does not also clear the selection.
   useEffect(() => {
     const el = dialog.current;
     if (!el) return;
     function onKey(e: KeyboardEvent) {
       if (e.key !== "Escape") return;
-      // Stopped, so the window-level handler does not also read it as "clear
-      // the selection" and throw away what the sheet was about to act on.
       e.preventDefault();
       e.stopPropagation();
       onCancel();
@@ -82,11 +66,6 @@ export function PlanSheet({
 
       {view.variants_note && (
         <div className="sheet__variants">
-          {/* The one thing the headline cannot say: what resolution actually
-              produced. Both the heading and each row's label
-              are composed in `crates/engine`, so this cannot drift from what
-              the CLI prints — the label is a repository *name* when a command
-              has only one, which is the normal shape for a derived tag. */}
           <p>{view.variants_note}</p>
           <ul>
             {view.variants.map((v) => (
@@ -99,24 +78,16 @@ export function PlanSheet({
         </div>
       )}
 
-      {/* What the action's own words cannot say about *these* repositories —
-          the count of untracked files `add -A` would sweep up. Phrased
-          in `crates/engine` like everything else here. */}
       {view.warning && <p className="sheet__warning">{view.warning}</p>}
 
       {view.empty_note && <p className="sheet__empty">{view.empty_note}</p>}
 
-      {/* The obstacle, when there is one. Its words are the guard's, so the CLI
-          demands the same thing in the same terms. */}
       {guard && <Guard guard={guard} supplied={supplied} onChange={setSupplied} />}
 
       <footer className="sheet__actions">
-        {/* Default focus, so Return on a sheet nobody read does nothing. */}
         <button ref={cancel} onClick={onCancel}>
           Cancel
         </button>
-        {/* Absent, not disabled, when there is nothing to run: `confirm_label`
-            is `null` exactly then, so this cannot be got wrong here. */}
         {view.confirm_label && (
           <button
             className={`primary${isDangerous(guard) ? " danger" : ""}`}
@@ -131,12 +102,6 @@ export function PlanSheet({
   );
 }
 
-/**
- * The thing that must be done before the confirm control works.
- *
- * Composes no prose: the sentence is the guard's, and the only thing decided
- * here is which control collects the answer.
- */
 function Guard({
   guard,
   supplied,
@@ -193,9 +158,7 @@ function Row({
   return (
     <details className={`planrow planrow--${kind}`}>
       <summary>
-        {/* An explicit chevron: `display: grid` on a `summary` suppresses the
-            native disclosure marker, and a row that expands has to look like
-            one or nobody will try. */}
+        {/* `display: grid` on `summary` suppresses the native disclosure marker. */}
         <span className="planrow__chevron" aria-hidden="true">
           ▸
         </span>

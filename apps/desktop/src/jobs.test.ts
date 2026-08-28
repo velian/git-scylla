@@ -1,12 +1,4 @@
-/**
- * The drawer's fold.
- *
- * The design brief is one click from "40 repos done" to "what happened to
- * number 37", and everything the drawer shows is a fold over the event stream.
- * So the properties worth pinning down are the ones that decide whether that
- * click lands on the right thing: which batch a job files under, whether a row
- * replaces or duplicates, and whether a transcript accumulates in order.
- */
+/** Tests the drawer's fold: which batch a job files under, upsert vs duplicate, transcript order. */
 import { describe, expect, it } from "vitest";
 import {
   apply,
@@ -65,7 +57,6 @@ function only(state: Drawer): BatchView {
 
 describe("apply", () => {
   it("returns the same state when nothing in the tick concerned it", () => {
-    // A scan streaming a hundred rows must not re-render the drawer.
     const before = apply(EMPTY, [job(1, 1, "/a", QUEUED)], NOW);
     const after = apply(before, [
       { type: "Rows", value: [] },
@@ -75,8 +66,7 @@ describe("apply", () => {
   });
 
   it("meets a batch through its jobs, because that is the only way it can", () => {
-    // A user batch emits its first job events *inside* `start_batch`, before
-    // that call has returned an id, so the drawer never learns of a batch first.
+    // A user batch's first job events are emitted inside `start_batch`, before it returns an id.
     const state = apply(EMPTY, [job(1, 7, "/a", QUEUED)], NOW);
     expect(only(state)).toMatchObject({ id: 7, origin: "User", label: null, action: null });
     expect(only(state).rows).toEqual([{ id: 1, repo: "/a", state: QUEUED }]);
@@ -92,8 +82,6 @@ describe("apply", () => {
   });
 
   it("keeps rows in the order the engine announced them", () => {
-    // Skips first, then the plan — so the drawer shows the shape of the batch
-    // before anything starts running.
     const state = apply(
       EMPTY,
       [job(1, 7, "/skipped", SKIPPED), job(2, 7, "/a", QUEUED), job(3, 7, "/b", QUEUED)],
@@ -108,17 +96,12 @@ describe("apply", () => {
   });
 
   it("drops a background job that belongs to no batch", () => {
-    // A drawer organised by batches has nowhere to put a lone fetch, and a
-    // fabricated home would be worse than the silence.
     expect(apply(EMPTY, [job(1, null, "/a", OK, "Background")], NOW)).toBe(EMPTY);
   });
 
   it("records a batch summary, and drops one for a batch it never met", () => {
     const state = apply(EMPTY, [job(1, 7, "/a", OK), batchDone(7, "1 ok in 0.1s")], NOW);
     expect(only(state)).toMatchObject({ line: "1 ok in 0.1s" });
-
-    // Unheard-of means its events were dropped; inventing a row-less batch with
-    // a guessed origin would be worse than the silence.
     expect(apply(EMPTY, [batchDone(99)], NOW)).toBe(EMPTY);
   });
 
@@ -149,7 +132,6 @@ describe("name", () => {
 
 describe("reload", () => {
   it("replaces an accumulated transcript rather than appending to it", () => {
-    // Called only after a drop, when what was accumulated may have a hole.
     const state = reload(apply(EMPTY, [log(1, "partial")], NOW), 1, [
       { at: 0, stream: "Stdout", text: "whole" } as unknown as LogLine,
     ]);
@@ -173,8 +155,6 @@ describe("visible", () => {
   });
 
   it("shows failed background work regardless", () => {
-    // A tool that fetches by itself every fifteen minutes and hides the fact
-    // that it cannot is worse than one that does not fetch at all.
     expect(visible(of("Background", OK, FAILED), false)).toBe(true);
   });
 });
@@ -210,15 +190,12 @@ describe("elapsed", () => {
     expect(elapsed(0)).toBe("0:00");
     expect(elapsed(4_400)).toBe("0:04");
     expect(elapsed(83_000)).toBe("1:23");
-    // A clock that moved backwards is not a negative duration.
     expect(elapsed(-1)).toBe("0:00");
   });
 });
 
 describe("stateLabel", () => {
   it("transliterates the variant rather than interpreting it", () => {
-    // The reason a skip carries lives in `SkipReason` and is shown beside this,
-    // not folded into it.
     expect(stateLabel(QUEUED)).toBe("queued");
     expect(stateLabel(RUNNING)).toBe("running");
     expect(stateLabel(OK)).toBe("ok");

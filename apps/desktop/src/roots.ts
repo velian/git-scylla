@@ -1,10 +1,4 @@
-/**
- * Grouping repositories under the roots they came from.
- *
- * Presentation, not domain logic: the engine has no concept of a configured
- * root — it takes them per scan — so which sidebar row a repository belongs
- * under is a question only the shell asks.
- */
+/** Grouping repositories under the roots they came from, for the sidebar. */
 import type { DiscoveryError, RepoSnapshot } from "./bindings";
 import { basename } from "./columns";
 
@@ -25,13 +19,7 @@ export function isUnder(path: string, root: string): boolean {
   return path.startsWith(base);
 }
 
-/**
- * Count repositories per root.
- *
- * A repository is attributed to its **longest** matching root, so overlapping
- * roots do not double-count. The Rust side rejects nested roots when they are
- * added, but a root can also come to contain another after the fact.
- */
+/** Count repositories per root. Each is attributed to its longest matching root. */
 export function summarise(
   roots: string[],
   repos: RepoSnapshot[],
@@ -56,9 +44,6 @@ export function summarise(
       name: basename(path),
       count,
       unreadable,
-      // Nothing found and something refused: on macOS that is almost always
-      // TCC. Nothing found under a genuinely empty directory is not a problem
-      // and must not be dressed up as one.
       looksBlocked: count === 0 && unreadable > 0,
     };
   });
@@ -75,7 +60,6 @@ function countUnreadable(errors: DiscoveryError[], root: string): number {
         if (e.value === root) n += 1;
         break;
       case "MoreUnreadable":
-        // Not attributable to a root; counted so the total is honest.
         n += e.value;
         break;
     }

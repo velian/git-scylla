@@ -1,21 +1,13 @@
 /**
- * The action bar.
- *
- * Every control here does one of two things: build an `Action` and ask for a
- * plan, or — for `Refresh`, which mutates nothing — go straight to the engine.
- * Neither branch decides whether a repository is eligible; that is the plan's
- * job, and this file has no opinion about it.
- *
- * Some actions need a message or a name first, which is what `Compose`
- * collects. That is a step *before* the plan and never a step around it: the
- * sheet is still the only path from an intention to a batch.
+ * The action bar. Every control builds an `Action` and asks for a plan, or —
+ * for `Refresh`, which mutates nothing — goes straight to the engine.
+ * Eligibility is decided by the plan, never here.
  */
 import { useCallback, useRef, useState } from "react";
 import { Compose, type Field, type Values } from "./Compose";
 import { useDismiss } from "./useDismiss";
 import type { Action, CustomCommand, Placeholder, PullMode } from "./bindings";
 
-/** The modes, in the CLI's order: safest first. */
 const PULL_MODES: { mode: PullMode; label: string }[] = [
   { mode: "FfOnly", label: "Fast-forward only" },
   { mode: "Rebase", label: "Rebase" },
@@ -38,16 +30,12 @@ export function ActionBar({
 }: {
   count: number;
   busy: boolean;
-  /** Saved custom commands, from the shell's config. */
   custom: CustomCommand[];
-  /** The template substitution set, from `core::template` — never restated
-      here, because help that repeats a table is help that goes stale. */
+  /** The template substitution set, from `core::template`. */
   placeholders: Placeholder[];
   onAction: (action: Action) => void;
   onRefresh: () => void;
 }) {
-  // The reason, not just the disabled state. A greyed-out button that does not
-  // say why reads as a broken one.
   const reason =
     count === 0
       ? "Select one or more repositories first."
@@ -99,8 +87,6 @@ export function ActionBar({
       action: { type: "Push", value: { set_upstream: "origin", force_with_lease: false } },
     },
     {
-      // Separated from the others by a rule, and marked. This is the one push
-      // that can destroy somebody else's work.
       label: "Push with lease…",
       action: { type: "Push", value: { set_upstream: null, force_with_lease: true } },
       danger: true,
@@ -143,9 +129,6 @@ export function ActionBar({
     },
   ];
 
-  // Derived per repository from that repository's tags, so nothing is asked
-  // here except which series and where a new one starts. The name itself
-  // appears in the plan, which is the only place it can honestly appear.
   const tags: Choice[] = (["dev", "rc"] as const).flatMap((channel) =>
     (["Minor", "Major"] as const).map((bump) => ({
       label: `Cut ${channel} tag (${bump.toLowerCase()} bump)`,
@@ -167,8 +150,6 @@ export function ActionBar({
 
   const customs: Choice[] = custom.map((c) => ({
     label: c.name,
-    // Its own saved flags decide the semaphore and whether `head_before` is
-    // recorded; the engine cannot reason about the command and does not try.
     action: {
       type: "Custom",
       value: { args: c.args, network: c.network, mutating: c.mutating },
@@ -192,11 +173,6 @@ export function ActionBar({
           action: { type: "Pull", value: { mode } },
         }))}
       />
-      {/* Fast-forward only, and no mode menu — deliberately narrower than the
-          CLI's `sync-default --mode`. A default branch that cannot fast-forward
-          has local commits on it, and reconciling those across a working set
-          the user is not standing on is not a thing to do from a toolbar. The
-          title says so rather than leaving the omission to be discovered. */}
       <button
         disabled={off}
         title={
@@ -218,9 +194,6 @@ export function ActionBar({
         <Menu label="Custom" disabled={off} reason={reason} onAction={onAction} choices={customs} />
       )}
 
-      {/* Not a plan: re-probing changes nothing, so a confirmation sheet would
-          be asking permission to look. The same narrow exception `fetch_now`
-          gets. */}
       <button disabled={off} title={reason} onClick={onRefresh}>
         Refresh
       </button>
@@ -248,7 +221,6 @@ function Menu({
   const [composing, setComposing] = useState<Choice | null>(null);
   const root = useRef<HTMLDivElement>(null);
 
-  // A menu that survives a click elsewhere is a menu you have to fight.
   const dismiss = useCallback(() => {
     setOpen(false);
     setComposing(null);
@@ -264,7 +236,6 @@ function Menu({
     }
   }
 
-  // A single choice needs no menu; the button is the choice.
   const single = choices.length === 1 ? choices[0] : null;
 
   return (

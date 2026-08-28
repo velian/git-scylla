@@ -1,10 +1,4 @@
-/**
- * The job drawer.
- *
- * The reason it exists at all: one click from "40 repos done" to "what happened
- * to number 37". Everything below is in service of that — the rows are a list
- * you can click, and clicking one puts the raw transcript on screen.
- */
+/** The job drawer: batches as a clickable list, and the raw transcript behind each job. */
 import { useEffect, useState } from "react";
 import { basename } from "./columns";
 import { elapsed, isRunning, progress, stateLabel, visible } from "./jobs";
@@ -30,7 +24,6 @@ export function Drawer({
 }) {
   const [showBackground, setShowBackground] = useState(false);
   const [selected, setSelected] = useState<JobId | null>(null);
-  // Only while something is running: an idle drawer should cost nothing.
   const [, tick] = useState(0);
   const running = state.batches.some(isRunning);
   useEffect(() => {
@@ -57,8 +50,6 @@ export function Drawer({
         </button>
         {!open && state.batches[0] && <Glance batch={state.batches[0]} />}
         <span className="drawer__spacer" />
-        {/* One predicate and a toggle, so a scheduler running something every
-            fifteen minutes does not mean reworking the drawer. */}
         <label className="drawer__filter">
           <input
             type="checkbox"
@@ -143,15 +134,7 @@ function Batch({
           </>
         ) : (
           <>
-            {/* Partial failure is a normal outcome. The banner is the same
-                sentence the CLI prints, and it is not styled as an error. */}
             <span className="batch__summary">{batch.line}</span>
-            {/* Undo is offered from the batch summary, for the session only.
-                It goes through the plan sheet like anything else —
-                pressing this proposes, it does not reset. A batch with nothing
-                to undo comes back as an empty plan and the sheet says so, which
-                is a better answer than a control that is missing for reasons
-                the user cannot see. */}
             <button className="inline-action" onClick={onUndo}>
               Undo…
             </button>
@@ -212,24 +195,12 @@ function Row({
   );
 }
 
-/**
- * A skip reason as text.
- *
- * The variant name, not a phrasing of it: the prose lives on `SkipReason` in
- * Rust and reaches the user through the plan sheet, which is where a skip is
- * explained. Restating it here would be a second phrasing, free to drift.
- */
+/** A skip reason as text: the `SkipReason` variant name, not a phrasing of it. */
 function skipReason(why: { type: string }): string {
   return why.type.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
 }
 
-/**
- * The raw interleaved transcript.
- *
- * Monospaced, timestamped, and copyable — deliberately not parsed, summarised
- * or prettified. The value of a transcript is that it is what git actually
- * said.
- */
+/** The raw interleaved transcript. Monospaced and copyable, not parsed or summarised. */
 function Transcript({
   id,
   lines,
@@ -275,7 +246,7 @@ function Transcript({
   );
 }
 
-/** `14:32:07.412` — millisecond resolution, because git is fast. */
+/** `14:32:07.412` — millisecond resolution. */
 function time(at: number): string {
   const d = new Date(at);
   const hms = d.toTimeString().slice(0, 8);

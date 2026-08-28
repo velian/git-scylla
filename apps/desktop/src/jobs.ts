@@ -1,14 +1,4 @@
-/**
- * The drawer's state, accumulated from the event stream.
- *
- * Pure and separate from the component: what a batch looks like at any moment
- * is a fold over the events, and a fold is easier to reason about — and to fix
- * — when it is not tangled with rendering.
- *
- * Nothing here decides anything about repositories. It files events into
- * batches and rows; the states, the counts and the summary sentence all arrive
- * already decided from `crates/engine`.
- */
+/** The drawer's state, folded from the event stream. Owns no repository logic. */
 import type {
   Action,
   BatchId,
@@ -26,21 +16,11 @@ export type JobRow = { id: JobId; repo: RepoId; state: JobState };
 export type BatchView = {
   id: BatchId;
   origin: JobOrigin;
-  /**
-   * The plan headline the user confirmed, e.g. "Pull 12 repos (ff-only)".
-   *
-   * `null` until named. A batch's first job events are emitted *inside*
-   * `start_batch`, before it has returned an id, so the drawer always meets a
-   * batch through its jobs and is told what it is a moment later.
-   */
+  /** The plan headline the user confirmed. `null` until named. */
   label: string | null;
   /** The template, so a failed row can be retried through a fresh plan. */
   action: Action | null;
-  /**
-   * When the drawer first saw it. Client-side on purpose: this drives a ticking
-   * "elapsed" while the batch runs, and once it finishes the engine's own
-   * duration takes over inside `line`.
-   */
+  /** When the drawer first saw it. Client-side; drives a ticking "elapsed" while the batch runs. */
   firstSeen: number;
   /** In the order the engine announced them: skips first, then the plan. */
   rows: JobRow[];
@@ -58,18 +38,12 @@ export type Drawer = {
 
 export const EMPTY: Drawer = { batches: [], logs: {} };
 
-/**
- * Fold one tick's worth of events into the drawer.
- *
- * Returns the same object when nothing in the tick concerned it, so a scan
- * streaming rows does not re-render the drawer.
- */
+/** Fold one tick's worth of events into the drawer. */
 export function apply(state: Drawer, events: UiEvent[], now: number): Drawer {
   let batches = state.batches;
   let logs = state.logs;
   let changed = false;
 
-  /** The batch this event belongs to, created on first sighting. */
   function batchAt(id: BatchId, origin: JobOrigin): number {
     const at = batches.findIndex((b) => b.id === id);
     if (at !== -1) return at;
@@ -82,10 +56,6 @@ export function apply(state: Drawer, events: UiEvent[], now: number): Drawer {
 
   for (const event of events) {
     if (event.type === "BatchDone") {
-      // Not created if unknown. A batch always announces its jobs before they
-      // reach a terminal state, so an unheard-of one here means its events were
-      // dropped — and inventing a row-less batch with a guessed origin would be
-      // worse than the silence.
       const at = batches.findIndex((b) => b.id === event.value.id);
       if (at === -1) continue;
       batches = replace(batches, at, {
@@ -101,9 +71,6 @@ export function apply(state: Drawer, events: UiEvent[], now: number): Drawer {
 
     if (inner.type === "JobStateChanged") {
       const { id, batch, origin, repo, state: jobState } = inner.value;
-      // A job with no batch is a lone background fetch. A drawer organised by
-      // batches has nowhere to put one, so it is dropped rather than given a
-      // fabricated home.
       if (batch === null) continue;
       const at = batchAt(batch, origin);
       const b = batches[at];
@@ -137,7 +104,6 @@ export function name(
 ): Drawer {
   const at = state.batches.findIndex((b) => b.id === id);
   if (at === -1) {
-    // The reply beat the events. Rare, but the batch must still appear.
     return {
       ...state,
       batches: [
@@ -154,20 +120,13 @@ export function reload(state: Drawer, id: JobId, lines: LogLine[]): Drawer {
   return { ...state, logs: { ...state.logs, [id]: lines } };
 }
 
-/**
- * Whether a batch belongs on screen.
- *
- * The drawer shows `User` work. Background work — the fetch scheduler's — is
- * behind the toggle, **except** when it failed. A tool that fetches by itself
- * every fifteen minutes and hides the fact that it cannot is worse than one
- * that does not fetch at all.
- */
+/** Whether a batch belongs on screen: user work always; background work only if it failed. */
 export function visible(batch: BatchView, showBackground: boolean): boolean {
   if (batch.origin === "User" || showBackground) return true;
   return batch.rows.some((r) => r.state.type === "Failed");
 }
 
-/** How far along, for the header. Skips count as done: they will not move. */
+/** How far along, for the header. Skips count as done. */
 export function progress(batch: BatchView): { done: number; total: number } {
   const done = batch.rows.filter(
     (r) => r.state.type !== "Queued" && r.state.type !== "Running",
@@ -185,13 +144,7 @@ export function elapsed(ms: number): string {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
 
-/**
- * The row's state as a word.
- *
- * The one place the frontend names a `JobState`, and it is a transliteration of
- * the variant rather than an interpretation: the reason a skip carries lives in
- * `SkipReason` and is shown beside it, not folded into this.
- */
+/** The row's state as a word, a transliteration of the `JobState` variant. */
 export function stateLabel(state: JobState): string {
   switch (state.type) {
     case "Queued":

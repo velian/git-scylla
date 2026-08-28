@@ -28,68 +28,45 @@ export default function App() {
   const [failure, setFailure] = useState<string | null>(null);
   const report = useCallback((e: unknown) => setFailure(asBridgeError(e).message), []);
 
-  // Discovery — rows, scan progress, discovery errors — and the roots that feed
-  // it. Both are self-contained enough to live outside this file; what is left
-  // here is the window: selection, filtering, and the action flow.
   const scan = useScan(report);
   const { repos, scanning, progress, errors, lagged } = scan;
   const roots = useRoots(scan, report);
 
-  // Keyed by RepoId, so a refresh that replaces every row leaves the selection
-  // intact — the user chose repositories, not table positions.
+  // Keyed by RepoId, so a row refresh that replaces every row leaves the selection intact.
   const [selected, setSelected] = useState<Set<RepoId>>(new Set());
   const [filter, setFilter] = useState("");
-  // The filter text as last committed for evaluation. Separate from `filter` so
-  // that typing is debounced without new rows being able to postpone the query.
+  // The filter text as last committed for evaluation, debounced separately from typing.
   const [query, setQuery] = useState("");
   const [matching, setMatching] = useState<Set<RepoId> | null>(null);
   const [filterError, setFilterError] = useState<string | null>(null);
-  // Worst first, so problems surface at the top. Lifted out of the grid because
-  // View ▸ Sort By sets it too.
   const [sort, setSort] = useState<Sort>({ key: "badge", dir: "asc" });
   const filterBox = useRef<HTMLInputElement>(null);
-  // The sheet is the only path from an action to a running batch. Holding the
-  // whole `PlanSheet` — plan and view together — is what lets the confirm
-  // button hand back the exact plan the user was shown.
+  // Plan and view together, so the confirm button hands back the exact plan shown.
   const [sheet, setSheet] = useState<Sheet | null>(null);
   const [planning, setPlanning] = useState(false);
-  // The batch the open sheet would undo, if it is an undo. What routes the
-  // confirmation to `startUndo` rather than `startBatch`, so the new batch is
-  // marked and cannot itself be undone.
+  // The batch the open sheet would undo, if it is an undo. Routes confirm to
+  // `startUndo` instead of `startBatch`.
   const [undoing, setUndoing] = useState<BatchId | null>(null);
-  // Everything that has run this session. Folded from events in `jobs.ts`,
-  // never persisted.
+  // Everything that has run this session. Folded from events; never persisted.
   const [batches, setBatches] = useState<jobs.Drawer>(jobs.EMPTY);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  // The template substitution set, asked for once. Served by the engine rather
-  // than restated here: help that repeats a table is help that goes stale.
   const [placeholders, setPlaceholders] = useState<Placeholder[]>([]);
   useEffect(() => {
-    engine.templatePlaceholders().then(setPlaceholders).catch(() => {
-      // Help text that failed to load is not worth an error banner; the field
-      // still works, and the placeholders are in the CLI's help too.
-    });
+    engine.templatePlaceholders().then(setPlaceholders).catch(() => {});
   }, []);
-  // Stable, so the sheet's Escape handler is bound once rather than on every
-  // render of the grid behind it.
   const dismiss = useCallback(() => {
     setSheet(null);
     setUndoing(null);
   }, []);
 
   useEffect(() => {
-    // `live` closes the window between this effect being torn down and the
-    // `listen` promise resolving enough to unsubscribe. Without it a remount —
-    // which StrictMode does on every mount in development — leaves two
-    // listeners briefly, and the drawer's transcripts are the one piece of
-    // state where applying an event twice is visible: job states upsert by id,
-    // log lines append.
+    // `live` closes the window between unmount and the `listen` promise
+    // resolving; without it, StrictMode's development remount leaves two
+    // listeners briefly, and job states/log lines would apply twice.
     let live = true;
     const pending = engine.onEvents((events) => {
       if (!live) return;
-      // Each fold takes the whole tick rather than one event at a time, so a
-      // batch of forty state changes is one re-render apiece.
       setBatches((prev) => jobs.apply(prev, events, Date.now()));
       scan.apply(events);
     });
@@ -99,9 +76,7 @@ export default function App() {
     };
   }, [scan.apply]);
 
-  // Debounce the *text*, and only the text: it is the one thing a person types,
-  // and a round trip per keystroke is waste. Clearing the box is not typing, so
-  // un-filtering is immediate.
+  // Debounce the text only; clearing the box is not typing, so un-filtering is immediate.
   useEffect(() => {
     if (filter.trim() === "") {
       setQuery("");
@@ -111,22 +86,14 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [filter]);
 
-  // The expression is evaluated by the engine — there is no grammar on this
-  // side. One parser, in the engine, used by the CLI too.
-  //
-  // `repos` is a dependency because a repository discovered after the query ran
-  // may match it. It must not be able to *defer* the query, though, which is
-  // what sharing one debounce with the text did: rows arrive on a 50 ms tick
-  // during a scan, so the 120 ms timer was reset before it could ever fire and
-  // a filter typed while scanning matched nothing until the scan settled.
+  // The expression is evaluated by the engine; there is no grammar on this side.
   useEffect(() => {
     if (query.trim() === "") {
       setMatching(null);
       setFilterError(null);
       return;
     }
-    // Two queries can be in flight across a `repos` change, and nothing
-    // guarantees they resolve in order. Only the newest may write.
+    // Two queries can be in flight across a `repos` change; only the newest may write.
     let live = true;
     engine
       .selectRepos(query)
@@ -136,8 +103,6 @@ export default function App() {
         setFilterError(null);
       })
       .catch((e) => {
-        // A malformed expression shows nothing and says why, rather than
-        // silently matching nothing and looking like an empty working set.
         if (!live) return;
         setMatching(new Set());
         setFilterError(asBridgeError(e).message);
@@ -147,12 +112,9 @@ export default function App() {
     };
   }, [query, repos]);
 
-  // ⌘A selects everything currently shown.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      // Nothing here applies while the sheet is up. Escape in particular: the
-      // dialog closes itself, and clearing the selection on the way out would
-      // silently discard the thing the user was in the middle of confirming.
+      // Nothing here applies while the sheet is up; Escape closes the sheet itself.
       if (sheetRef.current) return;
       if ((e.metaKey || e.ctrlKey) && e.key === "a") {
         const target = e.target as HTMLElement | null;
@@ -166,9 +128,6 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // The menu bar. Every item routes to the same function the window's own
-  // control does — the menu is a second way to reach an action, never a second
-  // implementation of one.
   useEffect(() => {
     let live = true;
     const pending = engine.onMenu((command) => {
@@ -180,24 +139,20 @@ export default function App() {
     };
   }, []);
 
-  // Menu items that need a selection are greyed out when there is none. Sent on
-  // the empty↔non-empty transition only, so it is a handful of round trips.
   const hasSelection = selected.size > 0;
   useEffect(() => {
-    engine.setHasSelection(hasSelection).catch(() => {
-      // A menu that failed to grey out is not worth an error banner.
-    });
+    engine.setHasSelection(hasSelection).catch(() => {});
   }, [hasSelection]);
 
-  // Choosing an action plans it. It never executes: that takes the sheet.
+  /** Plans an action. Never executes: that takes the sheet. */
   async function propose(action: Action, over?: RepoId[]) {
     setFailure(null);
     setPlanning(true);
     const selection: Selection = { type: "Ids", value: over ?? [...selected] };
     try {
       const proposed = await engine.plan(action, selection);
-      // Suppress the acknowledgement for a definition already agreed to. Only
-      // that guard: a force-with-lease is never waved through.
+      // Suppress the acknowledgement only for a definition already agreed to;
+      // a force-with-lease is never waved through.
       if (
         acknowledged(action) &&
         proposed.view.confirm_guard?.type === "Acknowledge"
@@ -222,9 +177,8 @@ export default function App() {
     try {
       const batch =
         undoes === null ? await engine.startBatch(plan) : await engine.startUndo(undoes, plan);
-      // The drawer has almost certainly met this batch already — its first job
-      // events are emitted inside `start_batch`, before it returns — so this
-      // names one that exists rather than creating one.
+      // The drawer has almost certainly already met this batch through its
+      // job events, which start before `start_batch` returns.
       setBatches((prev) => jobs.name(prev, batch, view.confirm_label ?? view.headline, plan.action, Date.now()));
       setDrawerOpen(true);
     } catch (e) {
@@ -232,18 +186,13 @@ export default function App() {
     }
   }
 
-  // A retry goes back through the sheet rather than straight to the engine.
-  // The repository is in whatever state made it fail, so the preconditions may
-  // now say something different — and that is worth seeing before running it
-  // again.
+  /** Retries through the sheet, since preconditions may say something different now. */
   function retry(batch: BatchView, repo: RepoId) {
     if (batch.action === null) return;
     void propose(batch.action, [repo]);
   }
 
-  // Undo proposes; it never resets. Same sheet, same confirmation, same skip
-  // reasons — undo is not a special case, and `execute` below is what
-  // eventually runs it.
+  /** Undo proposes through the same sheet as any other action; it never resets directly. */
   async function undoBatch(batch: BatchView) {
     setFailure(null);
     setPlanning(true);
@@ -265,9 +214,6 @@ export default function App() {
     }
   }
 
-  // Transcripts are folded from the event stream, which is complete unless the
-  // channel dropped events. It says when it does, so re-read on open after a
-  // lag rather than showing a transcript with a hole in it.
   const reloadTranscript = useCallback(
     (id: JobId) => {
       if (lagged === 0) return;
@@ -279,8 +225,7 @@ export default function App() {
     [lagged, report],
   );
 
-  // Refreshing re-probes; it changes nothing, so it does not go through a sheet
-  // — the same narrow exception `fetch_now` gets.
+  /** Re-probes without a plan sheet, like `fetch_now`: nothing here changes anything. */
   async function refreshSelected() {
     setFailure(null);
     try {
@@ -302,8 +247,6 @@ export default function App() {
       case "ClearSelection":
         return setSelected(new Set());
       case "Refresh":
-        // Nothing selected means "refresh what I am looking at", which is the
-        // whole working set — the roots.
         return void (selected.size > 0 ? refreshSelected() : scan.rescan(roots.paths));
       case "RescanRoots":
         return void scan.rescan(roots.paths);
@@ -332,11 +275,7 @@ export default function App() {
     }
   }
 
-  // A custom command that has not been acknowledged carries the plan's guard,
-  // and one that has does not. The engine always sends the guard — it has no
-  // business knowing what a particular person has read — so suppressing it for
-  // an acknowledged definition is the shell's job, and doing it here keeps the
-  // CLI, which has no saved definitions, asking every time.
+  /** A custom command carries its plan's acknowledgement guard unless already acknowledged. */
   function acknowledged(action: Action): boolean {
     if (action.type !== "Custom") return false;
     const argv = JSON.stringify(action.value.args);
@@ -346,23 +285,17 @@ export default function App() {
   }
 
   async function removeRoot(path: string) {
-    // The rows about to disappear may be selected, and a selection of
-    // repositories that no longer exist is not one any action should see.
     setSelected(new Set());
     await roots.remove(path);
   }
 
   const summaries = summarise(roots.paths, repos, errors);
   const blocked = summaries.filter((s) => s.looksBlocked);
-  // The filter narrows what is shown; it never changes what is selected, so a
-  // selection made before typing survives clearing the box.
   const shown = matching === null ? repos : repos.filter((r) => matching.has(r.id));
   const shownRef = useRef(shown);
   shownRef.current = shown;
   const sheetRef = useRef(sheet);
   sheetRef.current = sheet;
-  // The handler closes over state that changes every render, but the listener
-  // is bound once. A ref is the join.
   const menuRef = useRef(onMenu);
   menuRef.current = onMenu;
 
@@ -468,14 +401,7 @@ export default function App() {
   );
 }
 
-/**
- * Scan progress that does not block anything.
- *
- * A determinate bar in the title bar, not a modal or an overlay on the grid:
- * rows stream in as they are probed and stay clickable, sortable and selectable
- * throughout. The count is there because a bar alone cannot say whether it is
- * stuck at 40 of 41 or 40 of 4000.
- */
+/** Scan progress in the title bar. Rows stream into the grid throughout; nothing blocks. */
 function ScanProgress({ progress }: { progress: Progress | null }) {
   const { found, probed } = progress ?? { found: 0, probed: 0 };
   return (
@@ -499,12 +425,8 @@ function RootRow({ root, onRemove }: { root: RootSummary; onRemove: () => void }
 }
 
 /**
- * The highest-value error message in the application.
- *
- * An unsigned build scanning a protected directory finds nothing and looks
- * identical to an empty working set. Saying so, and offering the one button
- * that fixes it, is the difference between a tool that appears broken and one
- * that tells you what to do.
+ * Shown when a root yields nothing and something under it refused to be
+ * read: on macOS, an unsigned build without Full Disk Access.
  */
 function FullDiskAccessHint({
   roots,

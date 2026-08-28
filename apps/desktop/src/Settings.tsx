@@ -1,15 +1,4 @@
-/**
- * The custom-command editor.
- *
- * These are the deliberate escape hatch: the closed `Action` enum will not cover
- * everything, and the alternative is a shell loop with no plan, no transcript
- * and no per-repository results.
- *
- * The editor's job is to make what a definition *does not get* impossible to
- * miss. Preconditions do not apply, undo does not apply, and the engine has no
- * opinion about the command — so the acknowledgement is a first-class control
- * here rather than a line of small print.
- */
+/** The custom-command editor, plus editor/terminal configuration. */
 import { useEffect, useState } from "react";
 import { engine } from "./engine/client";
 import type { CustomCommand } from "./bindings";
@@ -35,10 +24,6 @@ export function Settings({
 }) {
   const [draft, setDraft] = useState<CustomCommand | null>(null);
 
-  // What the terminal handoff would actually use. Asked of the engine rather
-  // than worked out here: the resolution reads `$TERM_PROGRAM` and the
-  // filesystem, neither of which the front end can see, and a second
-  // implementation of it would be a second thing to be wrong.
   const [resolved, setResolved] = useState<string | null>(null);
   useEffect(() => {
     engine.resolvedTerminal().then(setResolved).catch(() => setResolved(null));
@@ -91,14 +76,6 @@ export function Settings({
             onSetTerminal(e.target.value.trim() === "" ? null : e.target.value)
           }
         />
-        {/* The resolved choice, shown because a handoff has no plan sheet to
-            show it in — an automatic choice nobody can see before it is made is
-            the kind this project does not make.
-
-            Real text rather than the field's placeholder, and stated once. A
-            placeholder carrying the answer would be greyed, easy to skim past,
-            and would have to invent something to say on the one occasion the
-            engine could not be asked. */}
         {terminal === null && resolved && (
           <small className="muted">
             currently <code>{resolved}</code>
@@ -122,9 +99,6 @@ export function Settings({
               <span className="settings__flags">
                 {c.network ? "network" : "local"}
                 {c.mutating ? ", mutating" : ""}
-                {/* The state that decides whether running it asks first. Shown,
-                    because a user who cannot see it cannot understand why one
-                    command asks and another does not. */}
                 {c.acknowledged ? "" : ", not yet acknowledged"}
               </span>
               <button onClick={() => setDraft({ ...c })}>Edit</button>
@@ -171,11 +145,8 @@ function Editor({
   onSave: () => void;
   onCancel: () => void;
 }) {
-  // The argv is edited as text and split on whitespace, which is the honest
-  // shape for a field: a quoted-string parser here would be a shell in
-  // everything but name, and this exists precisely because there is no shell.
-  // An argument containing a space is the one case it cannot express, and the
-  // rendered preview below is where that shows.
+  // Edited as text and split on whitespace; an argument containing a space
+  // is the one case this cannot express.
   const [args, setArgs] = useState(draft.args.join(" "));
   const argv = args.split(/\s+/).filter(Boolean);
   const ready = draft.name.trim() !== "" && argv.length > 0;
@@ -210,8 +181,6 @@ function Editor({
             onChange({ ...draft, args: e.target.value.split(/\s+/).filter(Boolean) });
           }}
         />
-        {/* Exactly what will run, which is the same three strings the plan
-            sheet shows, the process gets and the transcript records. */}
         <small>
           will run <code>git {argv.join(" ")}</code>
         </small>

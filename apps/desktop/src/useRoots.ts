@@ -1,11 +1,4 @@
-/**
- * The configured roots, and the scan that follows a change to them.
- *
- * The engine has no concept of a configured working set — it takes roots per
- * scan — so persisting the choice is the shell's job, and re-scanning after a
- * change is the other half of it. Kept together because a root added but not
- * scanned, or removed but still on screen, is the failure worth designing out.
- */
+/** The configured roots, and the scan that follows a change to them. */
 import { useCallback, useEffect, useState } from "react";
 import { engine } from "./engine/client";
 import type { Config } from "./bindings";
@@ -15,11 +8,9 @@ const EMPTY: Config = { roots: [], editor: null, terminal: null, custom: [] };
 
 export type Roots = {
   paths: string[];
-  /** The whole persisted configuration, for the surfaces that need the rest of
-      it — the custom-command menu and the settings editor. */
+  /** The whole persisted configuration, for the custom-command menu and settings editor. */
   config: Config;
-  /** Replace it, after a command that returns the configuration as it now
-      stands. */
+  /** Replace it, after a command that returns the configuration as it now stands. */
   adopt: (config: Config) => void;
   /** Pick a directory and add it. A dismissed picker changes nothing. */
   add: () => Promise<void>;
@@ -34,8 +25,6 @@ export function useRoots(
   const paths = config.roots;
   const { rescan, reset } = scan;
 
-  // Load the persisted roots and scan them, so a relaunch comes back to the
-  // working set rather than to an empty window.
   useEffect(() => {
     engine
       .getConfig()
@@ -46,8 +35,6 @@ export function useRoots(
       .catch(onError);
   }, [rescan, onError]);
 
-  // The rows on screen belong to the old root set, so they go before the new
-  // scan starts rather than lingering until it overwrites them.
   const rescanFor = useCallback(
     async (next: Config) => {
       setConfig(next);
@@ -60,9 +47,7 @@ export function useRoots(
   const add = useCallback(async () => {
     try {
       const picked = await engine.pickRootDir();
-      if (picked === null) return; // dismissed, which is a choice
-      // The reply, not the argument: the merge rules may have dropped a nested
-      // path or replaced narrower ones, and the window must not guess which.
+      if (picked === null) return;
       await rescanFor(await engine.addRoot(picked));
     } catch (e) {
       onError(e);
@@ -80,8 +65,6 @@ export function useRoots(
     [rescanFor, onError],
   );
 
-  // Settings changes do not move the working set, so they replace the
-  // configuration without triggering a scan.
   const adopt = useCallback((next: Config) => setConfig(next), []);
 
   return { paths, config, adopt, add, remove };
