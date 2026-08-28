@@ -5,7 +5,7 @@
 
 use git_scylla_core::{FetchHealth, Head, ProbeOutcome, RepoKind, RepoSnapshot, WorkTree};
 use git_scylla_engine::{Config, Engine};
-use git_scylla_probe::{BoxFuture, Probe, ProbeRequest};
+use git_scylla_probe::{BoxFuture, Probe, ProbeRequest, RefAnswer, RefError, RefQuery, RefRequest};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -33,6 +33,22 @@ impl Probe for Instant0 {
                 watched: false,
             }
         })
+    }
+
+    /// This diagnostic scans and never plans, so nothing asks. An error per
+    /// request rather than an empty vector: the contract is one answer per
+    /// request in order, and a short vector would be a silent mismatch in the
+    /// caller instead of a loud one here.
+    fn refs<'a>(
+        &'a self,
+        repos: Vec<RefRequest>,
+        _query: RefQuery,
+    ) -> BoxFuture<'a, Vec<Result<RefAnswer, RefError>>> {
+        let answers = repos
+            .iter()
+            .map(|_| Err(RefError::Interrupted("Instant0 answers no ref questions".into())))
+            .collect();
+        Box::pin(async move { answers })
     }
 }
 

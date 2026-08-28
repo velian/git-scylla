@@ -27,7 +27,7 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 git-scylla-core = { workspace = true, features = ["testkit"] }
-git-scylla-probe = { workspace = true }
+git-scylla-probe = { workspace = true, features = ["testkit"] }
 git-scylla-store = { workspace = true }
 git-scylla-watch = { workspace = true }
 git-scylla-discovery = { workspace = true }

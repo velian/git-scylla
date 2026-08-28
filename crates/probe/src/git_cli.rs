@@ -1,7 +1,7 @@
 use crate::config::parse_remotes;
 use crate::gitdir::{detect_in_progress, last_fetch, resolve_common_dir};
 use crate::porcelain::{parse_porcelain_v2, PorcelainStatus};
-use crate::{BoxFuture, Probe, ProbeRequest};
+use crate::{BoxFuture, Probe, ProbeRequest, RefAnswer, RefError, RefQuery, RefRequest};
 use git_scylla_core::{
     FetchHealth, Head, Oid, ProbeOutcome, RepoId, RepoKind, RepoSnapshot, Upstream,
 };
@@ -185,6 +185,55 @@ impl Probe for GitCliProbe {
     fn probe<'a>(&'a self, req: ProbeRequest) -> BoxFuture<'a, RepoSnapshot> {
         Box::pin(self.probe_inner(req))
     }
+
+    /// Every read here is `std::fs`, so the whole batch goes to
+    /// `spawn_blocking`.
+    ///
+    /// Not a micro-optimisation. The caller is an actor task that also serves
+    /// every command; walking `refs/tags` for a hundred repositories on it pins
+    /// a runtime worker for the duration, and nothing else — no probe, no job —
+    /// makes progress. One hand-off for the batch is the whole reason this is
+    /// async and batched rather than three per-repository calls.
+    fn refs<'a>(
+        &'a self,
+        repos: Vec<RefRequest>,
+        query: RefQuery,
+    ) -> BoxFuture<'a, Vec<Result<RefAnswer, RefError>>> {
+        // Taken before the move, so a join failure can still answer for every
+        // request rather than returning a vector of the wrong length.
+        let n = repos.len();
+        Box::pin(async move {
+            let work = move || repos.iter().map(|req| answer_refs(req, &query)).collect();
+            match tokio::task::spawn_blocking(work).await {
+                Ok(answers) => answers,
+                Err(e) => (0..n).map(|_| Err(RefError::Interrupted(e.to_string()))).collect(),
+            }
+        })
+    }
+}
+
+/// One repository's answer, with the readable-at-all check in front of it.
+///
+/// The gate belongs here rather than inside the three readers. Each of them
+/// swallows `std::io::Error` on purpose — an absent `packed-refs` is the normal
+/// case for a loose repository, and a missing `refs/tags` is what a project
+/// with no releases looks like — so threading errors out of them would turn
+/// ordinary states into failures. One `metadata` call in front separates "this
+/// repository answered no" from "this repository could not be asked", which is
+/// the only distinction the caller actually needs.
+fn answer_refs(req: &RefRequest, query: &RefQuery) -> Result<RefAnswer, RefError> {
+    match std::fs::metadata(&req.git_dir) {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => return Err(RefError::NotADirectory { path: req.git_dir.clone() }),
+        Err(source) => return Err(RefError::Unreadable { path: req.git_dir.clone(), source }),
+    }
+    Ok(match query {
+        RefQuery::DefaultBranch => {
+            RefAnswer::DefaultBranch(default_branch(&req.git_dir, &req.remotes))
+        }
+        RefQuery::Tags => RefAnswer::Tags(tags(&req.git_dir)),
+        RefQuery::Exists { rev } => RefAnswer::Exists(has_ref(&req.git_dir, rev)),
+    })
 }
 
 fn head_from(status: &PorcelainStatus) -> Head {
@@ -404,7 +453,7 @@ pub fn default_branch(git_dir: &Path, remotes: &[String]) -> Option<String> {
 /// [`has_ref`] answer `None`, which makes the caller let the job try. Being
 /// wrong in that direction costs a job that fails with a good message; being
 /// wrong the other way refuses work that would have succeeded.
-fn looks_like_revision(rev: &str) -> bool {
+pub(crate) fn looks_like_revision(rev: &str) -> bool {
     rev.is_empty()
         || rev.contains(['~', '^', ':', '@', '?', '*', '[', '\\', ' '])
         || rev.starts_with('-')

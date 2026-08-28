@@ -7,7 +7,9 @@
 
 use git_scylla_core::{Action, JobOrigin, JobState, RepoId, RepoSnapshot};
 use git_scylla_engine::{Config, Engine, EngineHandle, Event, Plan, Policy, Selection};
-use git_scylla_probe::{BoxFuture, GitCliProbe, Probe, ProbeRequest};
+use git_scylla_probe::{
+    BoxFuture, GitCliProbe, Probe, ProbeRequest, RefAnswer, RefError, RefQuery, RefRequest,
+};
 use git_scylla_watch::{Change, Index, Invalidation, Observed, Pending, Watched};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -94,6 +96,17 @@ impl Probe for Counting {
         *self.per_repo.lock().unwrap().entry(req.found.id.clone()).or_default() += 1;
         self.total.fetch_add(1, Ordering::SeqCst);
         self.inner.probe(req)
+    }
+
+    /// Uncounted, and forwarded: these tests are about how often a repository
+    /// is *probed*, and folding ref reads into that count would change what the
+    /// assertions mean.
+    fn refs<'a>(
+        &'a self,
+        repos: Vec<RefRequest>,
+        query: RefQuery,
+    ) -> BoxFuture<'a, Vec<Result<RefAnswer, RefError>>> {
+        self.inner.refs(repos, query)
     }
 }
 

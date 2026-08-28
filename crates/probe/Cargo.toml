@@ -6,6 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# `FakeProbe`, for planning tests in other crates. Off by default so a shipped
+# binary cannot construct invented ref answers, exactly as `core`'s `testkit`
+# feature guards `RepoSnapshot::stub` — which this needs, and so enables.
+testkit = ["git-scylla-core/testkit"]
+
 [dependencies]
 git-scylla-core = { workspace = true }
 git-scylla-discovery = { workspace = true }

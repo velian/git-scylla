@@ -661,7 +661,9 @@ async fn cancelling_a_queued_job_does_not_free_a_repository_another_job_holds() 
 async fn a_completed_job_causes_exactly_one_reprobe() {
     // Without this the watcher turns every pull into a probe storm. Counted
     // through a wrapping Probe, the engine's only I/O seam.
-    use git_scylla_probe::{BoxFuture, GitCliProbe, Probe, ProbeRequest};
+    use git_scylla_probe::{
+        BoxFuture, GitCliProbe, Probe, ProbeRequest, RefAnswer, RefError, RefQuery, RefRequest,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -675,6 +677,16 @@ async fn a_completed_job_causes_exactly_one_reprobe() {
             *self.counts.lock().unwrap().entry(req.found.path.clone()).or_default() += 1;
             self.total.fetch_add(1, Ordering::SeqCst);
             self.inner.probe(req)
+        }
+
+        /// Uncounted: this test counts probes per repository, and a ref read is
+        /// not one.
+        fn refs<'a>(
+            &'a self,
+            repos: Vec<RefRequest>,
+            query: RefQuery,
+        ) -> BoxFuture<'a, Vec<Result<RefAnswer, RefError>>> {
+            self.inner.refs(repos, query)
         }
     }
 
