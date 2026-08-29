@@ -79,6 +79,14 @@ export function Grid({ rows, roots, selected, onSelected, onError, sort, onSort 
       e.preventDefault();
       if (here === -1) return;
       toggle(sorted[here].id);
+      return;
+    }
+
+    if (e.key === "t" || e.key === "o") {
+      if (here === -1) return;
+      e.preventDefault();
+      const row = sorted[here];
+      engine.handOff(e.key === "t" ? "Terminal" : "Editor", row.path).catch(onError);
     }
   }
 
@@ -249,10 +257,16 @@ function RowMenu({
         <button onClick={() => run(engine.handOff("Finder", row.path))}>Reveal in Finder</button>
       </li>
       <li>
-        <button onClick={() => run(engine.handOff("Terminal", row.path))}>Open in Terminal</button>
+        <button onClick={() => run(engine.handOff("Terminal", row.path))}>
+          Open in Terminal
+          <span className="menu__hint">t</span>
+        </button>
       </li>
       <li>
-        <button onClick={() => run(engine.handOff("Editor", row.path))}>Open in editor</button>
+        <button onClick={() => run(engine.handOff("Editor", row.path))}>
+          Open in editor
+          <span className="menu__hint">o</span>
+        </button>
       </li>
       <li>
         <button onClick={() => run(navigator.clipboard.writeText(row.path))}>Copy path</button>

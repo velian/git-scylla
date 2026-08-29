@@ -440,6 +440,10 @@ tbody tr.is-stale { opacity: 0.55; }
   font: inherit;
   font-size: 13px;
   width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   text-align: left;
   padding: 4px 10px;
   border: none;
@@ -452,6 +456,16 @@ tbody tr.is-stale { opacity: 0.55; }
 .menu button:hover {
   background: var(--accent);
   color: white;
+}
+
+.menu__hint {
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.menu button:hover .menu__hint {
+  color: white;
+  opacity: 0.8;
 }
 
 /* --- the action bar and the plan sheet --- */
