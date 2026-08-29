@@ -4,16 +4,11 @@ use git_scylla_core::{
 use serde_json::{json, Value};
 
 /// What a fixture's snapshot must look like.
-///
-/// Omits `probed_at`, `last_fetch`, and the clock inside `FetchSchedule::Due`.
-/// Every other field is asserted exactly. See [`normalize`].
 #[derive(Debug, Clone)]
 pub struct Expect {
     pub kind: RepoKind,
     pub head: Head,
     pub upstream: UpstreamExpect,
-    /// Remote names, in config order. Every fixture remote is a local path,
-    /// so hosts are not asserted here.
     pub remotes: Vec<String>,
     pub work: WorkTree,
     pub op: Option<InProgress>,
@@ -40,24 +35,18 @@ impl Default for Expect {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpstreamExpect {
-    /// No upstream configured. Distinct from `Sync(0, 0)`.
     None,
-    /// Configured, tracking ref resolvable.
     Sync { remote: &'static str, remote_ref: String, ahead: u32, behind: u32 },
-    /// Configured, tracking ref deleted.
     Gone { remote: &'static str, remote_ref: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FetchExpect {
-    /// No remote to fetch from.
     Disabled,
-    /// A remote exists.
     Due,
 }
 
 impl Expect {
-    /// Render the expectation in the same shape [`normalize`] produces.
     pub fn to_json(&self, name: &str) -> Value {
         json!({
             "name": name,
@@ -89,10 +78,6 @@ impl Expect {
     }
 }
 
-/// Project a real snapshot into the shape [`Expect::to_json`] produces.
-///
-/// Drops `probed_at` and `last_fetch`; collapses `FetchSchedule::Due(t)` to
-/// `"due"`. Remote order is preserved and asserted.
 pub fn normalize(name: &str, s: &RepoSnapshot) -> Value {
     json!({
         "name": name,
@@ -115,4 +100,34 @@ pub fn normalize(name: &str, s: &RepoSnapshot) -> Value {
         },
         "outcome": s.outcome,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefExpect {
+    pub default_branch: Option<String>,
+    pub tags: Vec<String>,
+    pub exists: Vec<(String, Option<bool>)>,
+}
+
+impl Default for RefExpect {
+    fn default() -> Self {
+        Self { default_branch: Some("main".into()), tags: Vec::new(), exists: Vec::new() }
+    }
+}
+
+impl RefExpect {
+    pub fn no_default_branch(mut self) -> Self {
+        self.default_branch = None;
+        self
+    }
+
+    pub fn tags(mut self, tags: &[&str]) -> Self {
+        self.tags = tags.iter().map(|t| (*t).to_string()).collect();
+        self
+    }
+
+    pub fn exists(mut self, probes: &[(&str, Option<bool>)]) -> Self {
+        self.exists = probes.iter().map(|(r, a)| ((*r).to_string(), *a)).collect();
+        self
+    }
 }

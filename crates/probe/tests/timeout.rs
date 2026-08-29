@@ -1,10 +1,5 @@
 //! Deadline behaviour: one slow repository must not stall the grid, and the
 //! process group must actually die.
-//!
-//! "Slow" is produced with a `core.fsmonitor` hook that sleeps. That is a real
-//! slow `git status` — git invokes the hook and waits for it, and
-//! `--no-optional-locks` does not change that — rather than a mocked one, so
-//! this exercises the same spawn, deadline and kill path production uses.
 
 use git_scylla_core::ProbeOutcome;
 use git_scylla_discovery::RepoFound;
@@ -65,7 +60,7 @@ fn found(path: &Path) -> RepoFound {
         id: git_scylla_core::RepoId::new(path).unwrap(),
         path: path.to_path_buf(),
         kind: git_scylla_core::RepoKind::Normal,
-        git_dir: path.join(".git"),
+        per_worktree_dir: path.join(".git"),
     }
 }
 

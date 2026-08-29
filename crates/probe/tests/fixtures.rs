@@ -6,8 +6,8 @@
 //! reports something shows up here as a diff rather than as a wrong grid.
 
 use git_scylla_discovery::{WalkOptions, Walker};
-use git_scylla_probe::{GitCliProbe, Probe, ProbeRequest};
-use git_scylla_testkit::{normalize, FixtureSet};
+use git_scylla_probe::{GitCliProbe, Probe, ProbeRequest, RefAnswer, RefQuery, RefRequest};
+use git_scylla_testkit::{normalize, Fixture, FixtureSet};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -86,8 +86,6 @@ async fn the_scan_never_creates_an_index_lock() {
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let watcher = {
         let (root, stop) = (set.scan_root.clone(), stop.clone());
-        // Polls throughout the scan, not just after it: a lock held would
-        // exist for milliseconds at most.
         std::thread::spawn(move || {
             let mut seen = 0;
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
@@ -220,4 +218,100 @@ async fn a_probe_always_reports_the_id_it_was_given() {
     assert_eq!(snap.id, expected, "the probe invented a different identity");
     assert!(!snap.is_trustworthy(), "a deleted repository must not read as ok");
     assert_eq!(snap.badge(), git_scylla_core::Badge::Unknown);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_fixture_answers_its_declared_ref_questions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let set = FixtureSet::build(tmp.path()).expect("fixtures");
+    let probe = GitCliProbe::hermetic();
+
+    let found = discover(&set.scan_root).await;
+    let mut mismatches = Vec::new();
+
+    for f in &set.fixtures {
+        let rel = f.path.strip_prefix(&set.scan_root).unwrap();
+        let Some(req) = found.get(rel).map(request_for) else {
+            mismatches.push(format!("{}: not discovered", f.name));
+            continue;
+        };
+
+        check(
+            &mut mismatches,
+            f,
+            "default branch",
+            &probe.refs(vec![req.clone()], RefQuery::DefaultBranch).await,
+            RefAnswer::DefaultBranch(f.refs.default_branch.clone()),
+        );
+
+        let mut tags = f.refs.tags.clone();
+        tags.sort();
+        let answered = probe.refs(vec![req.clone()], RefQuery::Tags).await;
+        let sorted = answered.into_iter().map(|a| {
+            a.map(|a| match a {
+                RefAnswer::Tags(mut t) => {
+                    t.sort();
+                    RefAnswer::Tags(t)
+                }
+                other => other,
+            })
+        });
+        check(&mut mismatches, f, "tags", &sorted.collect::<Vec<_>>(), RefAnswer::Tags(tags));
+
+        for (rev, expected) in &f.refs.exists {
+            let query = RefQuery::Exists { rev: rev.clone() };
+            check(
+                &mut mismatches,
+                f,
+                &format!("exists {rev}"),
+                &probe.refs(vec![req.clone()], query).await,
+                RefAnswer::Exists(*expected),
+            );
+        }
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "{} ref answer(s) differ:\n{}",
+        mismatches.len(),
+        mismatches.join("\n")
+    );
+}
+
+fn check(
+    out: &mut Vec<String>,
+    f: &Fixture,
+    what: &str,
+    answered: &[Result<RefAnswer, git_scylla_probe::RefError>],
+    expected: RefAnswer,
+) {
+    match answered {
+        [Ok(actual)] if *actual == expected => {}
+        [Ok(actual)] => {
+            out.push(format!("{} {what}:\n  expected {expected:?}\n  actual   {actual:?}", f.name))
+        }
+        [Err(e)] => out.push(format!("{} {what}: could not be asked: {e}", f.name)),
+        other => out.push(format!("{} {what}: expected one answer, got {}", f.name, other.len())),
+    }
+}
+
+async fn discover(
+    scan_root: &std::path::Path,
+) -> BTreeMap<PathBuf, git_scylla_discovery::RepoFound> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let walker = Walker::new(vec![scan_root.to_path_buf()])
+        .options(WalkOptions { nested: true, max_depth: None });
+    let root = scan_root.to_path_buf();
+    let walk = tokio::task::spawn_blocking(move || walker.walk(tx));
+    let mut out = BTreeMap::new();
+    while let Some(found) = rx.recv().await {
+        let rel = found.path.strip_prefix(&root).unwrap().to_path_buf();
+        out.insert(rel, found);
+    }
+    walk.await.unwrap();
+    out
+}
+
+fn request_for(found: &git_scylla_discovery::RepoFound) -> RefRequest {
+    RefRequest { per_worktree_dir: found.per_worktree_dir.clone(), remotes: Vec::new() }
 }

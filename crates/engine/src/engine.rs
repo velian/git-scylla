@@ -431,7 +431,6 @@ impl Actor {
     }
 
     fn emit(&self, event: Event) {
-        // No listener is normal for the CLI between batches.
         let _ = self.events.send(event);
     }
 
@@ -507,7 +506,6 @@ impl Actor {
 
             Cmd::SetWatched { covered } => {
                 self.watched = covered;
-                // Applied to already-held snapshots too, not only future ones.
                 let moved: Vec<RepoSnapshot> = self
                     .snapshots
                     .values_mut()
@@ -527,7 +525,6 @@ impl Actor {
             }
 
             Cmd::Select { sel, reply } => {
-                // Sorted: HashMap order is not stable across calls.
                 let mut matched: Vec<&RepoSnapshot> =
                     self.snapshots.values().filter(|s| sel.contains(s)).collect();
                 matched.sort_by(|a, b| a.path.cmp(&b.path));
@@ -639,14 +636,12 @@ impl Actor {
             let mut reqs = Vec::with_capacity(ids.len());
             for id in ids {
                 let Some(found) = self.found.get(&id) else { continue };
-                // Only the DefaultBranch question needs remotes; empty is
-                // fine for the others.
                 let remotes = self
                     .snapshots
                     .get(&id)
                     .map(|s| s.remotes.iter().map(|r| r.name.clone()).collect())
                     .unwrap_or_default();
-                reqs.push(RefRequest { git_dir: found.git_dir.clone(), remotes });
+                reqs.push(RefRequest { per_worktree_dir: found.per_worktree_dir.clone(), remotes });
                 asked.push(id);
             }
             if !reqs.is_empty() {
@@ -673,18 +668,15 @@ impl Actor {
         });
     }
 
-    /// Compute an undo plan for a finished batch.
     fn plan_undo(&mut self, batch: BatchId) -> PlanTemplate {
         let Some(run) = self.batches.get(&batch) else {
             return crate::plan::no_undo();
         };
-        // Never undo an undo — one level only.
         if run.batch.undoes.is_some() {
             return crate::plan::no_undo();
         }
         let jobs: Vec<Job> =
             run.batch.jobs.iter().filter_map(|id| self.jobs.get(id).cloned()).collect();
-        // Requested, not awaited — see `Cmd::PlanUndo`.
         for job in &jobs {
             self.request_probe(&job.repo);
         }
@@ -696,7 +688,6 @@ impl Actor {
         if !self.scan_settled || !self.config.fetch.enabled {
             return;
         }
-        // Suspended while a user batch is running.
         if self.user_batch_in_flight() {
             return;
         }
@@ -758,8 +749,6 @@ impl Actor {
         let outcome = match &job.state {
             JobState::Ok => Attempt::Ok,
             JobState::Failed { .. } => Attempt::Failed(first_error(job)),
-            // Cancelled or skipped: nothing was attempted, so nothing is
-            // recorded.
             _ => return,
         };
         let Some(snap) = self.snapshots.get(&job.repo) else { return };

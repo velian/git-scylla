@@ -4,56 +4,40 @@ use git_scylla_core::InProgress;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-/// Resolve the *common* git directory.
-///
-/// A linked worktree's git dir contains a `commondir` file pointing at the
-/// main repository's `.git`. `MERGE_HEAD`, `rebase-merge/` and `HEAD` are
-/// per-worktree, in `git_dir`; `config`, `FETCH_HEAD` and `refs/remotes/` are
-/// shared, in the common dir.
-pub fn resolve_common_dir(git_dir: &Path) -> PathBuf {
-    let marker = git_dir.join("commondir");
+pub fn resolve_common_dir(per_worktree_dir: &Path) -> PathBuf {
+    let marker = per_worktree_dir.join("commondir");
     let Ok(contents) = std::fs::read_to_string(&marker) else {
-        return git_dir.to_path_buf();
+        return per_worktree_dir.to_path_buf();
     };
     let target = contents.trim();
     if target.is_empty() {
-        return git_dir.to_path_buf();
+        return per_worktree_dir.to_path_buf();
     }
     let raw = Path::new(target);
-    let joined = if raw.is_absolute() { raw.to_path_buf() } else { git_dir.join(raw) };
+    let joined = if raw.is_absolute() { raw.to_path_buf() } else { per_worktree_dir.join(raw) };
     joined.canonicalize().unwrap_or(joined)
 }
 
-/// Which multi-step operation, if any, is half-finished.
-///
-/// Marker files in the *per-worktree* git dir, checked in a fixed order —
-/// most obstructive first — so a repository carrying two markers reports
-/// deterministically.
-pub fn detect_in_progress(git_dir: &Path) -> Option<InProgress> {
-    if git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir() {
+pub fn detect_in_progress(per_worktree_dir: &Path) -> Option<InProgress> {
+    let d = per_worktree_dir;
+    if d.join("rebase-merge").is_dir() || d.join("rebase-apply").is_dir() {
         return Some(InProgress::Rebase);
     }
-    if git_dir.join("MERGE_HEAD").exists() {
+    if d.join("MERGE_HEAD").exists() {
         return Some(InProgress::Merge);
     }
-    if git_dir.join("CHERRY_PICK_HEAD").exists() {
+    if d.join("CHERRY_PICK_HEAD").exists() {
         return Some(InProgress::CherryPick);
     }
-    if git_dir.join("REVERT_HEAD").exists() {
+    if d.join("REVERT_HEAD").exists() {
         return Some(InProgress::Revert);
     }
-    if git_dir.join("BISECT_LOG").exists() {
+    if d.join("BISECT_LOG").exists() {
         return Some(InProgress::Bisect);
     }
     None
 }
 
-/// When anything last fetched into this repository.
-///
-/// `FETCH_HEAD`'s mtime is the primary signal and moves for any fetch by
-/// anyone, including the user's own terminal. A repository cloned but never
-/// fetched since has no `FETCH_HEAD`, so the fallback is the newest mtime
-/// among the per-remote directories under `refs/remotes/`.
 pub fn last_fetch(common_dir: &Path) -> Option<SystemTime> {
     if let Ok(md) = std::fs::metadata(common_dir.join("FETCH_HEAD")) {
         if let Ok(t) = md.modified() {

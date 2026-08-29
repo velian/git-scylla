@@ -11,7 +11,7 @@ use std::time::SystemTime;
 #[derive(Debug, Clone)]
 pub struct FakeRepo {
     path: PathBuf,
-    git_dir: PathBuf,
+    per_worktree_dir: PathBuf,
     snapshot: RepoSnapshot,
     default_branch: Option<String>,
     tags: Vec<String>,
@@ -20,15 +20,13 @@ pub struct FakeRepo {
 }
 
 impl FakeRepo {
-    /// A normal repository on `main`, with `main` as its default branch, one
-    /// remote called `origin`, no tags and no other refs.
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
         let mut snapshot = RepoSnapshot::stub(path.clone());
         snapshot.probed_at = SystemTime::now();
         snapshot.remotes = vec![Remote { name: "origin".to_string(), host: None }];
         Self {
-            git_dir: path.join(".git"),
+            per_worktree_dir: path.join(".git"),
             snapshot,
             default_branch: Some("main".to_string()),
             tags: Vec::new(),
@@ -74,13 +72,13 @@ impl FakeRepo {
             id: RepoId::from_canonical(self.path.clone()),
             path: self.path.clone(),
             kind: self.snapshot.kind.clone(),
-            git_dir: self.git_dir.clone(),
+            per_worktree_dir: self.per_worktree_dir.clone(),
         }
     }
 
     pub fn request(&self) -> RefRequest {
         RefRequest {
-            git_dir: self.git_dir.clone(),
+            per_worktree_dir: self.per_worktree_dir.clone(),
             remotes: self.snapshot.remotes.iter().map(|r| r.name.clone()).collect(),
         }
     }
@@ -113,7 +111,7 @@ impl FakeProbe {
 
     pub fn scaffold(&self) -> std::io::Result<()> {
         for repo in &self.repos {
-            std::fs::create_dir_all(&repo.git_dir)?;
+            std::fs::create_dir_all(&repo.per_worktree_dir)?;
         }
         Ok(())
     }
@@ -125,9 +123,9 @@ impl FakeProbe {
             .unwrap_or_else(|| panic!("FakeProbe: no repository registered at {}", path.display()))
     }
 
-    fn by_git_dir(&self, git_dir: &Path) -> &FakeRepo {
-        self.repos.iter().find(|r| r.git_dir == git_dir).unwrap_or_else(|| {
-            panic!("FakeProbe: no repository with git dir {}", git_dir.display())
+    fn by_git_dir(&self, per_worktree_dir: &Path) -> &FakeRepo {
+        self.repos.iter().find(|r| r.per_worktree_dir == per_worktree_dir).unwrap_or_else(|| {
+            panic!("FakeProbe: no repository with git dir {}", per_worktree_dir.display())
         })
     }
 }
@@ -146,10 +144,10 @@ impl Probe for FakeProbe {
         let answers = repos
             .iter()
             .map(|req| {
-                let repo = self.by_git_dir(&req.git_dir);
+                let repo = self.by_git_dir(&req.per_worktree_dir);
                 if repo.unreadable {
                     return Err(RefError::Unreadable {
-                        path: req.git_dir.clone(),
+                        path: req.per_worktree_dir.clone(),
                         source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
                     });
                 }

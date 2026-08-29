@@ -76,6 +76,14 @@ belongs to a repository whose trunk is *unknown*, and a plan that reported it as
 trunkless would put a sentence in front of the user that may be plainly false.
 Unknown and no have different remedies, so they are different values.
 
+The same rule decides *which* directory has to be readable: the one the refs
+are actually read from. A linked worktree keeps `refs/` in the main
+repository's git directory, so a worktree whose main repository is unreachable
+is a repository whose tags and trunk are unknown — not one with no tags and no
+trunk. An empty answer read from the wrong directory is the failure this
+distinction exists to prevent, and it is indistinguishable from a true one
+once it has been returned.
+
 ## The engine's I/O seam
 
 `Arc<dyn Probe>` — and it is the only one. The engine reaches the filesystem

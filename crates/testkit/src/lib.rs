@@ -5,6 +5,6 @@ mod expect;
 mod git;
 mod set;
 
-pub use expect::{normalize, Expect, FetchExpect, UpstreamExpect};
+pub use expect::{normalize, Expect, FetchExpect, RefExpect, UpstreamExpect};
 pub use git::{Git, GitError};
 pub use set::{Fixture, FixtureSet};

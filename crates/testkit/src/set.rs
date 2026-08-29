@@ -1,29 +1,24 @@
-use crate::expect::{Expect, FetchExpect, UpstreamExpect};
+use crate::expect::{Expect, FetchExpect, RefExpect, UpstreamExpect};
 use crate::git::{Git, GitError};
 use git_scylla_core::{Head, InProgress, Oid, RepoId, RepoKind, WorkTree};
 use std::path::{Path, PathBuf};
 
-/// One fixture repository and the snapshot it must produce.
 #[derive(Debug, Clone)]
 pub struct Fixture {
     pub name: String,
     pub path: PathBuf,
     pub expect: Expect,
-    /// Is this repository found only with `--nested`?
+    pub refs: RefExpect,
     pub nested_only: bool,
 }
 
-/// A built tree of fixture repositories.
 pub struct FixtureSet {
-    /// The directory everything was built in.
     pub dir: PathBuf,
-    /// The directory tests should scan. Excludes `origins/` and `scratch/`.
     pub scan_root: PathBuf,
     pub fixtures: Vec<Fixture>,
 }
 
 impl FixtureSet {
-    /// Build the whole set. `dir` must exist and should be empty.
     pub fn build(dir: &Path) -> Result<Self, GitError> {
         Builder::new(dir)?.build()
     }
@@ -32,7 +27,6 @@ impl FixtureSet {
         self.fixtures.iter().find(|f| f.name == name)
     }
 
-    /// Fixtures a default (non-nested) scan should discover.
     pub fn discoverable(&self) -> impl Iterator<Item = &Fixture> {
         self.fixtures.iter().filter(|f| !f.nested_only)
     }
@@ -58,8 +52,6 @@ impl Builder {
             })
         };
         mkdir(dir)?;
-        // macOS temp dirs are symlinks (`/var` -> `/private/var`); RepoId
-        // canonicalizes, so the expectation must too.
         let dir = dir.canonicalize().map_err(|e| GitError {
             args: vec!["canonicalize".into()],
             cwd: dir.to_path_buf(),
@@ -73,8 +65,6 @@ impl Builder {
         }
         Ok(Self { dir: dir.clone(), repos, origins, scratch, g: Git::new(home), out: Vec::new() })
     }
-
-    // ---- primitives ----------------------------------------------------
 
     fn init(&self, name: &str) -> Result<PathBuf, GitError> {
         self.g.run(&self.repos, &["init", name])?;
@@ -111,8 +101,6 @@ impl Builder {
         })
     }
 
-    /// A bare repository with one commit, to act as `origin`. Lives in
-    /// `origins/`, outside the scan root.
     fn origin_with_commit(&self, name: &str) -> Result<PathBuf, GitError> {
         let bare = format!("{name}.git");
         self.g.run(&self.origins, &["init", "--bare", &bare])?;
@@ -123,8 +111,6 @@ impl Builder {
         self.g.run(&seed, &["push", "-u", "origin", "main"])?;
         Ok(origin)
     }
-
-    /// Advance `origin` by one commit, via the scratch clone made above.
     fn advance_origin(&self, name: &str, n: u32) -> Result<(), GitError> {
         let seed = self.scratch.join(name);
         self.commit(&seed, "shared.txt", &format!("one\nremote {n}\n"), &format!("remote c{n}"))?;
@@ -138,14 +124,19 @@ impl Builder {
     }
 
     fn push(&mut self, name: &str, path: PathBuf, expect: Expect) {
-        self.out.push(Fixture { name: name.to_string(), path, expect, nested_only: false });
+        let refs = RefExpect::default();
+        self.out.push(Fixture { name: name.to_string(), path, expect, refs, nested_only: false });
     }
 
     fn push_nested(&mut self, name: &str, path: PathBuf, expect: Expect) {
-        self.out.push(Fixture { name: name.to_string(), path, expect, nested_only: true });
+        let refs = RefExpect::default();
+        self.out.push(Fixture { name: name.to_string(), path, expect, refs, nested_only: true });
     }
 
-    // ---- the set -------------------------------------------------------
+    fn refs(&mut self, name: &str, refs: RefExpect) {
+        let f = self.out.iter_mut().find(|f| f.name == name).expect("fixture pushed before refs");
+        f.refs = refs;
+    }
 
     fn build(mut self) -> Result<FixtureSet, GitError> {
         self.shapes()?;
@@ -155,18 +146,15 @@ impl Builder {
         self.in_progress()?;
         Ok(FixtureSet { dir: self.dir, scan_root: self.repos, fixtures: self.out })
     }
-
-    /// Repository shapes.
     fn shapes(&mut self) -> Result<(), GitError> {
         let p = self.init("clean")?;
         self.commit(&p, "a.txt", "a\n", "c1")?;
         self.push("clean", p, Expect::default());
 
-        // Fresh `git init`: HEAD names a branch that has no commit.
         let p = self.init("unborn")?;
         self.push("unborn", p, Expect { head: Head::Unborn("main".into()), ..Default::default() });
+        self.refs("unborn", RefExpect::default().no_default_branch());
 
-        // Bare: no worktree; `work` is not meaningful here.
         self.g.run(&self.repos, &["init", "--bare", "bare.git"])?;
         self.push(
             "bare",
@@ -177,8 +165,8 @@ impl Builder {
                 ..Default::default()
             },
         );
+        self.refs("bare", RefExpect::default().no_default_branch());
 
-        // Bare with commits and packed refs: what `git clone --mirror` produces.
         self.g.run(&self.repos, &["init", "--bare", "bare-packed.git"])?;
         let packed = self.repos.join("bare-packed.git");
         let seed = self.scratch.join("bare-packed");
@@ -196,15 +184,12 @@ impl Builder {
             },
         );
 
-        // A repository inside another repository's worktree. Pruned by default,
-        // found with --nested.
         let outer = self.init("nested-outer")?;
         self.commit(&outer, "a.txt", "a\n", "c1")?;
         let inner = outer.join("vendor/inner");
         std::fs::create_dir_all(&inner).ok();
         self.g.run(&outer.join("vendor"), &["init", "inner"])?;
         self.commit(&inner, "b.txt", "b\n", "c1")?;
-        // The inner repository is untracked content in the outer one.
         self.push(
             "nested-outer",
             outer,
@@ -214,10 +199,10 @@ impl Builder {
         Ok(())
     }
 
-    /// The two `.git`-is-a-file shapes.
     fn worktree_and_submodule(&mut self) -> Result<(), GitError> {
         let main = self.init("worktree-main")?;
         self.commit(&main, "a.txt", "a\n", "c1")?;
+        self.g.run(&main, &["tag", "v1.0.0"])?;
         self.g.run(&main, &["worktree", "add", "../worktree-linked", "-b", "wt"])?;
         self.push("worktree-main", main.clone(), Expect::default());
         self.push(
@@ -229,6 +214,16 @@ impl Builder {
                 ..Default::default()
             },
         );
+        let pair = RefExpect::default().tags(&["v1.0.0"]).exists(&[
+            ("main", Some(true)),
+            ("wt", Some(true)),
+            ("v1.0.0", Some(true)),
+            ("no-such-branch", Some(false)),
+            // Revision syntax is unanswerable from the filesystem.
+            ("main~3", None),
+        ]);
+        self.refs("worktree-main", pair.clone());
+        self.refs("worktree-linked", pair);
 
         let sub_origin = self.origin_with_commit("submodule-sub")?;
         let sup = self.init("submodule-super")?;
@@ -236,7 +231,6 @@ impl Builder {
         self.g.run(&sup, &["submodule", "add", path_str(&sub_origin), "sub"])?;
         self.g.run(&sup, &["commit", "-m", "add submodule"])?;
         self.push("submodule-super", sup.clone(), Expect::default());
-        // Nested-only: a submodule lives inside its superproject's worktree.
         self.push_nested(
             "submodule-sub",
             sup.join("sub"),
@@ -256,7 +250,6 @@ impl Builder {
         Ok(())
     }
 
-    /// HEAD and upstream.
     fn upstreams(&mut self) -> Result<(), GitError> {
         let sync = |ahead, behind| UpstreamExpect::Sync {
             remote: "origin",
@@ -275,7 +268,6 @@ impl Builder {
         let p = self.clone_from(&o, "in-sync")?;
         self.push("in-sync", p, tracked(sync(0, 0)));
 
-        // A remote is configured but this branch tracks nothing.
         let o = self.origin_with_commit("no-upstream")?;
         let p = self.init("no-upstream")?;
         self.commit(&p, "a.txt", "a\n", "c1")?;
@@ -287,7 +279,6 @@ impl Builder {
         self.commit(&p, "local.txt", "local\n", "local c1")?;
         self.push("ahead", p, tracked(sync(1, 0)));
 
-        // Behind only exists relative to a fetch: advance origin, then fetch.
         let o = self.origin_with_commit("behind")?;
         let p = self.clone_from(&o, "behind")?;
         self.advance_origin("behind", 2)?;
@@ -301,8 +292,6 @@ impl Builder {
         self.g.run(&p, &["fetch"])?;
         self.push("diverged", p, tracked(sync(1, 1)));
 
-        // Upstream configured, remote-tracking ref deleted. git omits
-        // `# branch.ab` entirely — the only signal this is not "in sync".
         let o = self.origin_with_commit("upstream-gone")?;
         let p = self.clone_from(&o, "upstream-gone")?;
         self.g.run(&p, &["update-ref", "-d", "refs/remotes/origin/main"])?;
@@ -329,7 +318,6 @@ impl Builder {
             },
         );
 
-        // Behind with only an untracked file, not a modification.
         let o = self.origin_with_commit("behind-untracked")?;
         let p = self.clone_from(&o, "behind-untracked")?;
         self.advance_origin("behind-untracked", 2)?;
@@ -372,7 +360,6 @@ impl Builder {
         Ok(())
     }
 
-    /// Working-tree states.
     fn worktree_states(&mut self) -> Result<(), GitError> {
         let p = self.init("untracked")?;
         self.commit(&p, "a.txt", "a\n", "c1")?;
@@ -402,7 +389,6 @@ impl Builder {
             Expect { work: WorkTree { staged: 1, ..Default::default() }, ..Default::default() },
         );
 
-        // One path, both sides of the index.
         let p = self.init("staged-and-modified")?;
         self.commit(&p, "a.txt", "a\n", "c1")?;
         self.write(&p, "a.txt", "staged\n")?;
@@ -417,7 +403,6 @@ impl Builder {
             },
         );
 
-        // A rename produces a type-2 record, occupying two NUL-separated fields.
         let p = self.init("renamed")?;
         self.commit(&p, "a.txt", "content\n", "c1")?;
         self.g.run(&p, &["mv", "a.txt", "b.txt"])?;
@@ -427,10 +412,6 @@ impl Builder {
             Expect { work: WorkTree { staged: 1, ..Default::default() }, ..Default::default() },
         );
 
-        // Adversarial filenames. A newline is what a line-oriented status parser
-        // gets wrong; git does not quote it even with `-z`. Non-UTF-8 names are
-        // not covered — the filesystem rejects them — and are tested directly
-        // in `probe::porcelain` instead.
         let p = self.init("awkward-names")?;
         self.commit(&p, "a.txt", "a\n", "c1")?;
         self.write(&p, "with space.txt", "x\n")?;
@@ -450,10 +431,7 @@ impl Builder {
         Ok(())
     }
 
-    /// Half-finished operations, each reached by running a git command that
-    /// fails or stops mid-way.
     fn in_progress(&mut self) -> Result<(), GitError> {
-        // Two branches editing the same line, so any of these conflicts.
         let diverge = |b: &Builder, p: &Path| -> Result<(), GitError> {
             b.commit(p, "a.txt", "base\n", "c1")?;
             b.g.run(p, &["checkout", "-b", "other"])?;
@@ -476,8 +454,6 @@ impl Builder {
             },
         );
 
-        // A merge that stopped on purpose rather than on a conflict: staged
-        // content, no conflicts, MERGE_HEAD present.
         let p = self.init("merge-in-progress")?;
         self.commit(&p, "a.txt", "base\n", "c1")?;
         self.g.run(&p, &["checkout", "-b", "other"])?;
@@ -495,8 +471,6 @@ impl Builder {
             },
         );
 
-        // A stopped rebase detaches HEAD, so the expectation carries the oid
-        // the rebase is replaying onto.
         let p = self.init("rebase-in-progress")?;
         diverge(self, &p)?;
         self.g.run_expect_failure(&p, &["rebase", "other"])?;
@@ -540,7 +514,6 @@ impl Builder {
             },
         );
 
-        // Bisect checks out a commit, so this repository is detached too.
         let p = self.init("bisect-in-progress")?;
         self.commit(&p, "a.txt", "one\n", "c1")?;
         let first = self.head_oid(&p)?;
@@ -567,7 +540,6 @@ fn path_str(p: &Path) -> &str {
     p.to_str().expect("fixture paths are ASCII by construction")
 }
 
-/// Create a file from a raw byte name, bypassing `&str`.
 fn write_raw_name(repo: &Path, name: &[u8]) -> Result<(), GitError> {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;

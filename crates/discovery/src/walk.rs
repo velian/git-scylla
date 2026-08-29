@@ -5,19 +5,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
 
-/// One discovered repository, emitted as it is found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoFound {
-    /// The repository's identity, resolved here and nowhere else: canonicalizing
-    /// the same path twice can give two different answers if it vanishes in
-    /// between.
     pub id: RepoId,
-    /// The repository's worktree root, or the repository itself when bare.
     pub path: PathBuf,
     pub kind: RepoKind,
-    /// The resolved git directory, already following the `.git` file for
-    /// linked worktrees and submodules.
-    pub git_dir: PathBuf,
+    pub per_worktree_dir: PathBuf,
 }
 
 /// Something the walk could not read. On macOS this is almost always TCC: an
@@ -31,19 +24,14 @@ pub enum DiscoveryError {
     UnusableRoot(PathBuf),
     #[error("could not read {path}: {reason}")]
     Unreadable { path: PathBuf, reason: String },
-    /// How many further unreadable directories were not listed.
     #[error("and {0} more unreadable")]
     MoreUnreadable(usize),
 }
 
-/// Unreadable directories reported individually before collapsing to a count.
 const MAX_UNREADABLE: usize = 20;
 
 #[derive(Debug, Clone, Default)]
 pub struct WalkOptions {
-    /// Descend into repositories to find nested ones. Off by default: a `.git`
-    /// inside a checked-out dependency tree is almost never a repository the
-    /// user means.
     pub nested: bool,
     pub max_depth: Option<usize>,
 }
@@ -56,9 +44,6 @@ pub struct Walker {
 
 #[derive(Default)]
 struct Found {
-    /// Repository roots discovered so far, used to prune their subtrees.
-    /// Pruning is an ancestor-prefix question, so a linear scan over this
-    /// `Vec` beats hashing the path at the scale this runs at.
     roots: Vec<PathBuf>,
 }
 
@@ -76,17 +61,10 @@ impl Walker {
         self
     }
 
-    /// A flag that abandons the walk when set. The walk is blocking, so it
-    /// cannot be cancelled by dropping a future; this is checked once per
-    /// directory entry instead.
     pub fn cancel_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.stop)
     }
 
-    /// Walk every root, sending each repository as it is found. Blocking: run
-    /// it on a dedicated thread. Returns the count sent, and the roots that
-    /// could not be walked at all — a nonexistent root is fatal, an
-    /// unreadable directory inside a root is not.
     pub fn walk(&self, tx: UnboundedSender<RepoFound>) -> (usize, Vec<DiscoveryError>) {
         let mut fatal = Vec::new();
         let mut usable = Vec::new();
@@ -99,19 +77,12 @@ impl Walker {
         if usable.is_empty() {
             return (0, fatal);
         }
-        // Two roots naming one directory are one root.
         usable.sort();
         usable.dedup();
 
         let found = Arc::new(Mutex::new(Found::default()));
         let count = Arc::new(Mutex::new(0usize));
 
-        // Classified here, not in the filter below: `ignore` never calls
-        // `filter_entry` for a depth-0 entry, so a root that is itself a
-        // repository would otherwise never be looked at. Doing it before the
-        // walk starts also means `Found::roots` already holds every root by
-        // the time the first child is filtered, so a root repository's
-        // subtree prunes through the same ancestor check as everyone else's.
         for root in &usable {
             if excluded(root, &usable) {
                 continue;
@@ -127,15 +98,11 @@ impl Walker {
             builder.add(r);
         }
         builder
-            // Gitignore semantics would be wrong here: the repository we
-            // want is frequently inside an ignored directory.
             .standard_filters(false)
             .hidden(false)
             .parents(false)
-            // The only defence against a symlink loop in the scan root.
             .follow_links(false)
             .max_depth(self.opts.max_depth)
-            // Serial and depth-first, so prune-on-match is a local decision.
             .threads(1);
 
         let roots_for_skip = usable.clone();
@@ -145,9 +112,6 @@ impl Walker {
         let c = Arc::clone(&count);
         let sender = tx.clone();
 
-        // Classification and pruning happen in the filter itself: `ignore`
-        // only lets us prevent descent from here, so a child's prune decision
-        // is always made after its parent has been classified.
         builder.filter_entry(move |entry| {
             if stop.load(Ordering::Relaxed) {
                 return false;
@@ -164,8 +128,6 @@ impl Walker {
                 return false;
             }
             accept(path, &f, &c, &sender);
-            // Yielded either way: if it was a repository, every child is then
-            // rejected by the ancestor check above.
             true
         });
 
@@ -189,10 +151,6 @@ impl Walker {
     }
 }
 
-/// Split a walk error into the path it concerns and why.
-///
-/// `ignore` wraps errors in `WithPath`/`WithDepth`, and the display form
-/// repeats the path inside the message. A UI wants the two separately.
 fn describe(err: &ignore::Error) -> (PathBuf, String) {
     let mut path = PathBuf::new();
     let mut current = err;
@@ -216,35 +174,26 @@ fn describe(err: &ignore::Error) -> (PathBuf, String) {
     }
 }
 
-/// Is this directory one the walk will neither classify nor look inside?
-/// `roots` are exempt from the name-based skips; a `.git` directory is not
-/// exempt, however it was reached.
 fn excluded(dir: &Path, roots: &[PathBuf]) -> bool {
     is_git_dir(dir) || looks_dataless(dir) || is_hard_skipped(dir, roots)
 }
 
-/// Is `dir` inside a repository already discovered?
 fn covered(found: &Mutex<Found>, dir: &Path) -> bool {
     found.lock().expect("discovery state poisoned").roots.iter().any(|r| dir.starts_with(r))
 }
 
-/// Classify `dir` and, if it is a repository, record and emit it. Shared by
-/// the root pre-pass and the walk filter.
 fn accept(dir: &Path, found: &Mutex<Found>, count: &Mutex<usize>, tx: &UnboundedSender<RepoFound>) {
-    let Some((kind, git_dir)) = classify(dir) else { return };
+    let Some((kind, per_worktree_dir)) = classify(dir) else { return };
     found.lock().expect("discovery state poisoned").roots.push(dir.to_path_buf());
     *count.lock().expect("discovery state poisoned") += 1;
-    // `from_canonical` skips a syscall: every path reaching here is already
-    // canonical, since roots are canonicalized and symlinks are never followed.
     let _ = tx.send(RepoFound {
         id: RepoId::from_canonical(dir),
         path: dir.to_path_buf(),
         kind,
-        git_dir,
+        per_worktree_dir,
     });
 }
 
-/// Is `dir` a repository, and if so of what kind and with which git dir?
 fn classify(dir: &Path) -> Option<(RepoKind, PathBuf)> {
     let dot_git = dir.join(".git");
     match std::fs::symlink_metadata(&dot_git) {
@@ -255,28 +204,21 @@ fn classify(dir: &Path) -> Option<(RepoKind, PathBuf)> {
     classify_bare(dir)
 }
 
-/// `.git` is a file containing `gitdir: <path>` — a linked worktree or a
-/// submodule. Which one is decided by where that path points.
 fn classify_git_file(dir: &Path, dot_git: &Path) -> Option<(RepoKind, PathBuf)> {
     let contents = std::fs::read_to_string(dot_git).ok()?;
     let target = contents.lines().find_map(|l| l.trim().strip_prefix("gitdir:")).map(str::trim)?;
     if target.is_empty() {
         return None;
     }
-    // Submodules use a relative gitdir; linked worktrees an absolute one.
     let raw = Path::new(target);
     let resolved = if raw.is_absolute() { raw.to_path_buf() } else { dir.join(raw) };
-    let git_dir = resolved.canonicalize().unwrap_or(resolved);
+    let per_worktree_dir = resolved.canonicalize().unwrap_or(resolved);
 
-    // The owning repository is the parent of the `.git` directory the path
-    // runs through.
-    let owner = owner_of(&git_dir);
-    let s = git_dir.to_string_lossy();
+    let owner = owner_of(&per_worktree_dir);
+    let s = per_worktree_dir.to_string_lossy();
     let kind = if s.contains("/worktrees/") {
         match owner.as_deref().and_then(|p| RepoId::new(p).ok()) {
             Some(main) => RepoKind::Worktree { main },
-            // A worktree whose main repository was deleted is still a
-            // repository.
             None => RepoKind::Normal,
         }
     } else if s.contains("/modules/") {
@@ -287,12 +229,9 @@ fn classify_git_file(dir: &Path, dot_git: &Path) -> Option<(RepoKind, PathBuf)> 
     } else {
         RepoKind::Normal
     };
-    Some((kind, git_dir))
+    Some((kind, per_worktree_dir))
 }
 
-/// The worktree that owns a `.git` directory appearing inside `git_dir`. For
-/// a submodule nested inside a submodule this returns the outermost
-/// superproject rather than the immediate parent.
 fn owner_of(git_dir: &Path) -> Option<PathBuf> {
     let mut acc = PathBuf::new();
     for comp in git_dir.components() {
@@ -304,8 +243,6 @@ fn owner_of(git_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// A bare repository: `HEAD`, `objects/` and `refs/` with no `.git`. `HEAD` is
-/// checked first and alone, so the common case costs one extra stat.
 fn classify_bare(dir: &Path) -> Option<(RepoKind, PathBuf)> {
     if !dir.join("HEAD").is_file() {
         return None;
@@ -352,7 +289,6 @@ mod tests {
         mk_normal(&root.join("a"));
         mk_normal(&root.join("b/c"));
         fs::create_dir_all(root.join("a/src/deep/deeper")).unwrap();
-        // A nested repository inside another repository's worktree.
         mk_normal(&root.join("a/vendor/inner"));
 
         let found = collect(root, WalkOptions::default());
@@ -367,7 +303,6 @@ mod tests {
         let root = &tmp.path().canonicalize().unwrap();
         mk_normal(root);
         fs::create_dir_all(root.join("src/deep")).unwrap();
-        // Still pruned: one repository, not one plus what's checked out inside it.
         mk_normal(&root.join("vendor/inner"));
 
         let found = collect(root, WalkOptions::default());
@@ -451,7 +386,7 @@ mod tests {
         let found = collect(tmp.path(), WalkOptions::default());
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].kind, RepoKind::Bare);
-        assert_eq!(found[0].git_dir, found[0].path);
+        assert_eq!(found[0].per_worktree_dir, found[0].path);
     }
 
     #[test]
@@ -527,7 +462,6 @@ mod tests {
         let root = &tmp.path().canonicalize().unwrap();
         mk_normal(&root.join("a"));
         std::os::unix::fs::symlink(root.as_path(), root.join("loop")).unwrap();
-        // The assertion is that this returns at all.
         let found = collect(root, WalkOptions::default());
         assert_eq!(found.len(), 1);
     }
@@ -544,7 +478,6 @@ mod tests {
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
 
         let (found, errors) = collect_with_errors(root, WalkOptions::default());
-        // Restore before the tempdir drop, or cleanup fails.
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
 
         assert!(found.iter().any(|f| f.path.file_name().unwrap() == "visible"));
@@ -596,7 +529,6 @@ mod tests {
         }
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let walker = Walker::new(vec![root.to_path_buf()]);
-        // Cancelled before it starts, so nothing below the roots is visited.
         walker.cancel_flag().store(true, Ordering::Relaxed);
         let (n, fatal) = walker.walk(tx);
         assert!(fatal.is_empty());

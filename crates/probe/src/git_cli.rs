@@ -10,8 +10,6 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::time::SystemTime;
 
-/// `--no-optional-locks` is mandatory: without it `git status` refreshes the
-/// index and takes `index.lock`, contending with the user's own git usage.
 const STATUS_ARGS: &[&str] = &[
     "--no-optional-locks",
     "status",
@@ -22,11 +20,8 @@ const STATUS_ARGS: &[&str] = &[
     "-unormal",
 ];
 
-/// The production [`Probe`]: one `git status` plus a few file reads.
 #[derive(Debug, Clone, Default)]
 pub struct GitCliProbe {
-    /// Environment overrides applied to every child. Empty in production;
-    /// [`Self::hermetic`] sets `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` for tests.
     extra_env: Vec<(OsString, OsString)>,
 }
 
@@ -56,7 +51,7 @@ impl GitCliProbe {
         let at = SystemTime::now();
         let id = found.id.clone();
 
-        let common_dir = resolve_common_dir(&found.git_dir);
+        let common_dir = resolve_common_dir(&found.per_worktree_dir);
         let remotes = parse_remotes(&common_dir.join("config"));
 
         if matches!(found.kind, RepoKind::Bare) {
@@ -104,7 +99,7 @@ impl GitCliProbe {
             remotes,
             work: status.work,
             // The found git dir, not the common one: in-progress state is per-worktree.
-            op: detect_in_progress(&found.git_dir),
+            op: detect_in_progress(&found.per_worktree_dir),
             stashes: status.stashes,
             fetch,
             probed_at: at,
@@ -114,8 +109,6 @@ impl GitCliProbe {
         }
     }
 
-    /// Bare repositories: head from `HEAD`, no worktree, no stashes. `git
-    /// status` fails in a bare repository, so it is never run here.
     async fn probe_bare(
         &self,
         id: RepoId,
@@ -154,8 +147,6 @@ impl Probe for GitCliProbe {
         Box::pin(self.probe_inner(req))
     }
 
-    /// Every read here is `std::fs`, so the whole batch runs on one
-    /// `spawn_blocking`.
     fn refs<'a>(
         &'a self,
         repos: Vec<RefRequest>,
@@ -172,24 +163,18 @@ impl Probe for GitCliProbe {
     }
 }
 
-/// One repository's answer, with the readable-at-all check in front of it.
-///
-/// The three readers below swallow `std::io::Error` — an absent
-/// `packed-refs` or `refs/tags` is an ordinary state, not a failure — so this
-/// one `metadata` call is what separates "answered no" from "could not be
-/// asked".
 fn answer_refs(req: &RefRequest, query: &RefQuery) -> Result<RefAnswer, RefError> {
-    match std::fs::metadata(&req.git_dir) {
+    match std::fs::metadata(&common_dir) {
         Ok(m) if m.is_dir() => {}
-        Ok(_) => return Err(RefError::NotADirectory { path: req.git_dir.clone() }),
-        Err(source) => return Err(RefError::Unreadable { path: req.git_dir.clone(), source }),
+        Ok(_) => return Err(RefError::NotADirectory { path: common_dir }),
+        Err(source) => return Err(RefError::Unreadable { path: common_dir, source }),
     }
     Ok(match query {
         RefQuery::DefaultBranch => {
-            RefAnswer::DefaultBranch(default_branch(&req.git_dir, &req.remotes))
+            RefAnswer::DefaultBranch(default_branch(&common_dir, &req.remotes))
         }
-        RefQuery::Tags => RefAnswer::Tags(tags(&req.git_dir)),
-        RefQuery::Exists { rev } => RefAnswer::Exists(has_ref(&req.git_dir, rev)),
+        RefQuery::Tags => RefAnswer::Tags(tags(&common_dir)),
+        RefQuery::Exists { rev } => RefAnswer::Exists(has_ref(&common_dir, rev)),
     })
 }
 
@@ -219,12 +204,6 @@ fn upstream_from(
     })
 }
 
-/// Split `origin/feature/x` into its remote and the rest.
-///
-/// Matched against the remotes read from config, longest name first, rather
-/// than split on the first `/` — branch names contain slashes far more often
-/// than remote names do. The fallback runs only when the config was
-/// unreadable.
 fn split_remote(remote_ref: &str, remotes: &[git_scylla_core::Remote]) -> String {
     let mut names: Vec<&str> = remotes.iter().map(|r| r.name.as_str()).collect();
     names.sort_by_key(|n| std::cmp::Reverse(n.len()));
@@ -236,8 +215,6 @@ fn split_remote(remote_ref: &str, remotes: &[git_scylla_core::Remote]) -> String
     remote_ref.split('/').next().unwrap_or(remote_ref).to_string()
 }
 
-/// The only fetch state the probe ever sets: `Disabled` with no remote,
-/// otherwise due immediately.
 fn initial_fetch_health(remotes: &[git_scylla_core::Remote], at: SystemTime) -> FetchHealth {
     if remotes.is_empty() {
         FetchHealth::disabled()
@@ -246,14 +223,13 @@ fn initial_fetch_health(remotes: &[git_scylla_core::Remote], at: SystemTime) -> 
     }
 }
 
-/// Read `HEAD` of a bare repository without spawning git.
-fn read_bare_head(git_dir: &Path) -> Option<Head> {
-    let raw = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+fn read_bare_head(common_dir: &Path) -> Option<Head> {
+    let raw = std::fs::read_to_string(common_dir.join("HEAD")).ok()?;
     let raw = raw.trim();
     if let Some(ref_name) = raw.strip_prefix("ref: refs/heads/") {
         let name = ref_name.to_string();
         let full = format!("refs/heads/{name}");
-        return Some(if ref_exists(git_dir, &full) {
+        return Some(if ref_exists(common_dir, &full) {
             Head::Branch(name)
         } else {
             Head::Unborn(name)
@@ -262,27 +238,16 @@ fn read_bare_head(git_dir: &Path) -> Option<Head> {
     Oid::parse(raw).ok().map(Head::Detached)
 }
 
-/// Does this repository have a ref the user could check out by this name?
-///
-/// `None` when the question cannot be answered from the filesystem — a raw
-/// object id, `main~3`, `origin/main@{2}`, anything carrying revision syntax.
-/// A caller treats `None` as "let the job try", and `Some(false)` as a
-/// plan-time skip with `RefNotFound`.
-///
-/// Answers for a local branch, a tag, or the remote-tracking branch git would
-/// DWIM into a local one.
-pub(crate) fn has_ref(git_dir: &Path, rev: &str) -> Option<bool> {
+pub(crate) fn has_ref(common_dir: &Path, rev: &str) -> Option<bool> {
     if looks_like_revision(rev) {
         return None;
     }
     let direct =
         [format!("refs/heads/{rev}"), format!("refs/tags/{rev}"), format!("refs/remotes/{rev}")];
-    if direct.iter().any(|full| ref_exists(git_dir, full)) {
+    if direct.iter().any(|full| ref_exists(common_dir, full)) {
         return Some(true);
     }
-    // DWIM form: a remote-tracking branch with the remote unnamed, e.g.
-    // `origin/main` answering for `main`.
-    let remotes = std::fs::read_dir(git_dir.join("refs/remotes"))
+    let remotes = std::fs::read_dir(common_dir.join("refs/remotes"))
         .into_iter()
         .flatten()
         .flatten()
@@ -290,7 +255,7 @@ pub(crate) fn has_ref(git_dir: &Path, rev: &str) -> Option<bool> {
     if remotes {
         return Some(true);
     }
-    let packed = std::fs::read_to_string(git_dir.join("packed-refs")).unwrap_or_default();
+    let packed = std::fs::read_to_string(common_dir.join("packed-refs")).unwrap_or_default();
     let dwim = packed.lines().any(|line| {
         !line.starts_with('#')
             && !line.starts_with('^')
@@ -304,15 +269,9 @@ pub(crate) fn has_ref(git_dir: &Path, rev: &str) -> Option<bool> {
     Some(dwim)
 }
 
-/// Every tag this repository has, by name.
-///
-/// Reads loose refs under `refs/tags/` and `packed-refs`: a `git gc`-ed
-/// repository has its tags packed with no loose files at all. Names only —
-/// the object each tag points at is not needed here.
-pub(crate) fn tags(git_dir: &Path) -> Vec<String> {
-    let root = git_dir.join("refs/tags");
+pub(crate) fn tags(common_dir: &Path) -> Vec<String> {
+    let root = common_dir.join("refs/tags");
     let mut out = Vec::new();
-    // Tags nest (`refs/tags/release/1.0`), so this walks rather than lists.
     let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
@@ -325,7 +284,7 @@ pub(crate) fn tags(git_dir: &Path) -> Vec<String> {
             }
         }
     }
-    let packed = std::fs::read_to_string(git_dir.join("packed-refs")).unwrap_or_default();
+    let packed = std::fs::read_to_string(common_dir.join("packed-refs")).unwrap_or_default();
     out.extend(packed.lines().filter_map(|line| {
         if line.starts_with('#') || line.starts_with('^') {
             return None;
@@ -333,25 +292,16 @@ pub(crate) fn tags(git_dir: &Path) -> Vec<String> {
         let (_, name) = line.split_once(' ')?;
         Some(name.trim_end().strip_prefix("refs/tags/")?.to_string())
     }));
-    // A tag can be both loose and packed after a partial `gc`.
     out.sort();
     out.dedup();
     out
 }
 
-/// Which branch does this repository treat as its default?
-///
-/// `refs/remotes/<remote>/HEAD` is the primary answer and the one `git clone`
-/// writes; it is a symbolic ref, always a loose file, so `packed-refs` is not
-/// consulted for it. Falls back to `main` then `master`, checked through
-/// [`has_ref`] so a branch that exists only as `origin/main` still counts.
-/// `None` means neither was found.
-pub(crate) fn default_branch(git_dir: &Path, remotes: &[String]) -> Option<String> {
-    // `origin` first when present, then the rest in configured order.
+pub(crate) fn default_branch(common_dir: &Path, remotes: &[String]) -> Option<String> {
     let ordered =
         remotes.iter().filter(|r| *r == "origin").chain(remotes.iter().filter(|r| *r != "origin"));
     for remote in ordered {
-        let head = git_dir.join("refs/remotes").join(remote).join("HEAD");
+        let head = common_dir.join("refs/remotes").join(remote).join("HEAD");
         let Ok(raw) = std::fs::read_to_string(&head) else { continue };
         let prefix = format!("ref: refs/remotes/{remote}/");
         if let Some(branch) = raw.trim().strip_prefix(&prefix) {
@@ -360,13 +310,12 @@ pub(crate) fn default_branch(git_dir: &Path, remotes: &[String]) -> Option<Strin
             }
         }
     }
-    ["main", "master"].into_iter().find(|name| has_ref(git_dir, name) == Some(true)).map(Into::into)
+    ["main", "master"]
+        .into_iter()
+        .find(|name| has_ref(common_dir, name) == Some(true))
+        .map(Into::into)
 }
 
-/// Does this look like a revision *expression* rather than a plain ref name?
-///
-/// Generous on purpose: anything unusual counts as an expression, so
-/// [`has_ref`] answers `None` and the caller lets the job try.
 pub(crate) fn looks_like_revision(rev: &str) -> bool {
     rev.is_empty()
         || rev.contains(['~', '^', ':', '@', '?', '*', '[', '\\', ' '])
@@ -376,22 +325,14 @@ pub(crate) fn looks_like_revision(rev: &str) -> bool {
         || (rev.len() >= 7 && rev.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
-/// Does a ref by this full name exist, loose or packed?
-///
-/// The loose file is checked first, but `packed-refs` is not optional: a bare
-/// mirror is normally packed and has no loose files at all.
-fn ref_exists(git_dir: &Path, full_name: &str) -> bool {
-    if git_dir.join(full_name).exists() {
+fn ref_exists(common_dir: &Path, full_name: &str) -> bool {
+    if common_dir.join(full_name).exists() {
         return true;
     }
-    std::fs::read_to_string(git_dir.join("packed-refs"))
+    std::fs::read_to_string(common_dir.join("packed-refs"))
         .is_ok_and(|packed| packed_refs_contains(&packed, full_name))
 }
 
-/// One `<oid> <refname>` per line.
-///
-/// `#` opens the header line and `^` a peeled tag target; neither names a ref,
-/// and treating a peel line as one would invent refs whose "name" is an oid.
 fn packed_refs_contains(packed: &str, full_name: &str) -> bool {
     packed.lines().any(|line| {
         !line.starts_with('#')
@@ -485,6 +426,30 @@ mod tests {
         assert_eq!(has_ref(g, "nope"), Some(false));
         for expression in ["main~3", "main^", "HEAD@{2}", "a1b2c3d4e5", "-x", "", "with space"] {
             assert_eq!(has_ref(g, expression), None, "{expression:?}");
+        }
+    }
+
+    #[test]
+    fn a_worktree_whose_common_dir_is_gone_cannot_be_asked_rather_than_answering_no() {
+        let tmp = tempfile::tempdir().unwrap();
+        let per_worktree_dir = tmp.path().join("wt-gitdir");
+        std::fs::create_dir_all(&per_worktree_dir).unwrap();
+        std::fs::write(per_worktree_dir.join("HEAD"), "ref: refs/heads/wt\n").unwrap();
+        std::fs::write(
+            per_worktree_dir.join("commondir"),
+            format!("{}\n", tmp.path().join("went-away/.git").display()),
+        )
+        .unwrap();
+
+        let req = RefRequest { per_worktree_dir, remotes: Vec::new() };
+        for query in
+            [RefQuery::DefaultBranch, RefQuery::Tags, RefQuery::Exists { rev: "wt".into() }]
+        {
+            let answer = answer_refs(&req, &query);
+            assert!(
+                matches!(answer, Err(RefError::Unreadable { .. })),
+                "{query:?} answered {answer:?}"
+            );
         }
     }
 

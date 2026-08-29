@@ -75,6 +75,15 @@ set. All requests in a batch run on one `spawn_blocking`, since every read
 here is `std::fs`: walking `refs/` for a hundred repositories on the calling
 task would pin a runtime worker for the duration.
 
+Every one of these reads is in the **common** dir, never the per-worktree one
+— see *Common dir resolution* below. `RefRequest` carries
+`per_worktree_dir` because that is what discovery found, and `answer_refs`
+resolves the common dir from it; a caller resolving it instead would be
+reaching the filesystem outside the seam. The readability check that
+separates "could not be asked" from "answered no" is on the common dir too,
+so a worktree whose main repository is unreachable reports a `RefError`
+rather than an empty `refs/`.
+
 | Query | Answer | `None`/absence means |
 | --- | --- | --- |
 | `DefaultBranch` | `Option<String>` | no `origin/HEAD` and no `main`/`master` fallback |
@@ -133,17 +142,18 @@ whole repository into a failure.
 file pointing at the main repository's `.git`. Some state is per-worktree,
 some is shared:
 
-| Per-worktree (`git_dir`) | Shared (common dir) |
+| Per-worktree (`per_worktree_dir`) | Shared (common dir) |
 | --- | --- |
 | `HEAD` | `config` |
 | `MERGE_HEAD`, `rebase-merge/` | `FETCH_HEAD` |
-| — | `refs/remotes/` |
+| — | `refs/heads/`, `refs/tags/`, `refs/remotes/` |
+| — | `packed-refs` |
 
 ```mermaid
 flowchart LR
-    wt["linked worktree git_dir"] -->|"commondir file"| common["main repository's .git\n(common dir)"]
+    wt["linked worktree per_worktree_dir"] -->|"commondir file"| common["main repository's .git\n(common dir)"]
     wt -->|"HEAD, MERGE_HEAD,\nrebase-merge/"| wt
-    common -->|"config, FETCH_HEAD,\nrefs/remotes/"| common
+    common -->|"config, FETCH_HEAD,\nrefs/, packed-refs"| common
 ```
 
 **In-progress operations.** `detect_in_progress` checks marker files in a
