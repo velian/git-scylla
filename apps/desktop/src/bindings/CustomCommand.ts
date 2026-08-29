@@ -5,24 +5,14 @@
  */
 export type CustomCommand = { name: string, 
 /**
- * An argv vector, **never a shell string**. No shell, no interpolation, no
- * injection surface — which is the whole reason this is safe to save and
- * re-run across forty repositories.
+ * An argv vector, **never a shell string**.
  */
 args: Array<string>, 
 /**
- * Which semaphore it takes, and whether `head_before` is recorded. The
- * engine cannot reason about an arbitrary command; whoever wrote the
- * definition can.
+ * Which semaphore it takes, and whether `head_before` is recorded.
  */
 network: boolean, mutating: boolean, 
 /**
- * The user has been told, once, that preconditions and undo do not apply.
- *
- * Persisted **per definition** rather than per session: the point is that
- * somebody read what this particular command does not get, not that they
- * clicked through a dialog recently. A definition whose argv is edited has
- * its acknowledgement cleared, because the thing they agreed to has
- * changed.
+ * Persisted per definition: an edit to `args` clears it.
  */
 acknowledged: boolean, };

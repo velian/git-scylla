@@ -2,10 +2,7 @@
 import type { ErrorKind } from "./ErrorKind";
 
 /**
- * A structured error, never a stringified `Debug`.
- *
- * `kind` is for the UI to branch on; `message` is for a person to read. A
- * `Debug`-formatted Rust error is neither — it cannot be matched on without
- * parsing prose, and it shows the user type names.
+ * A structured error, never a stringified `Debug`. `kind` is for the UI to
+ * branch on; `message` is for a person to read.
  */
 export type BridgeError = { kind: ErrorKind, message: string, };

@@ -3,32 +3,16 @@ import type { CustomCommand } from "./CustomCommand";
 
 /**
  * Everything persisted between launches.
- *
- * Only roots today. The struct exists rather than a bare `Vec<PathBuf>` so
- * that adding a setting later is a field rather than a file-format change.
  */
 export type Config = { roots: Array<string>, 
 /**
- * Application to open a repository in, by name as `open -a` understands it
- * — "Visual Studio Code", "Zed". `None` falls back to `$EDITOR`, which for
- * most people is a terminal program and will not work, so the row's menu
- * says so rather than failing silently.
+ * Application to open a repository in, by name as `open -a` understands
+ * it — "Visual Studio Code", "Zed". `None` falls back to `$EDITOR`.
  */
 editor: string | null, 
 /**
  * Application to open a repository's terminal in, by name as `open -a`
  * understands it — "Ghostty", "iTerm". `None` is resolved by
- * `handoff::terminal_app`, which always has an answer, so this differs
- * from `editor`: leaving it unset is a working configuration rather than a
- * missing one. The settings dialog shows what the resolution picked, so
- * the guess is visible.
+ * `handoff::terminal_app`, which always has an answer.
  */
-terminal: string | null, 
-/**
- * Named custom commands.
- *
- * The deliberate escape hatch from the closed `Action` enum, which will not
- * cover everything. The alternative is a shell loop with no plan, no
- * transcript and no per-repository results.
- */
-custom: Array<CustomCommand>, };
+terminal: string | null, custom: Array<CustomCommand>, };

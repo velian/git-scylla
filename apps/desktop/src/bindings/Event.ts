@@ -10,11 +10,4 @@ import type { RepoId } from "./RepoId";
 import type { RepoSnapshot } from "./RepoSnapshot";
 import type { ScanId } from "./ScanId";
 
-/**
- * Everything the actor publishes.
- *
- * Serializable because the desktop bridge forwards these straight to the
- * webview. The TypeScript is generated from this enum; a hand-written mirror
- * would drift.
- */
 export type Event = { "type": "ReposUpserted", "value": Array<RepoSnapshot> } | { "type": "ReposRemoved", "value": Array<RepoId> } | { "type": "ScanProgress", "value": { scan: ScanId, found: number, probed: number, } } | { "type": "ScanDone", "value": { scan: ScanId, errors: Array<DiscoveryError>, } } | { "type": "JobStateChanged", "value": { id: JobId, batch: BatchId | null, origin: JobOrigin, repo: RepoId, state: JobState, } } | { "type": "JobLogAppended", "value": { id: JobId, lines: Array<LogLine>, } } | { "type": "BatchDone", "value": { id: BatchId, summary: BatchSummary, } } | { "type": "Lagged" };

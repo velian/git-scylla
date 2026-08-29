@@ -3,11 +3,6 @@ import type { Action } from "./Action";
 import type { RepoId } from "./RepoId";
 
 /**
- * One distinct resolved action and the repositories that got it.
- *
- * Usually a single entry. More than one means resolution produced genuinely
- * different commands, and the plan has to say so — a header reading "Push 31
- * repos" while three of them push somewhere else is the kind of lie a plan
- * exists to prevent.
+ * header.
  */
 export type ActionVariant = { action: Action, repos: Array<RepoId>, };

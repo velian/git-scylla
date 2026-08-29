@@ -3,32 +3,4 @@ import type { Action } from "./Action";
 import type { RepoId } from "./RepoId";
 import type { SkipReason } from "./SkipReason";
 
-/**
- * What a batch would do, before it does any of it.
- */
-export type Plan = { 
-/**
- * The template the user chose.
- */
-action: Action, 
-/**
- * One entry per eligible repository, carrying the action **resolved for
- * that repository**.
- */
-eligible: Array<[RepoId, Action]>, skipped: Array<[RepoId, SkipReason]>, 
-/**
- * How many snapshots were offered, before the selection narrowed them.
- * Context for a header, not part of the plan's arithmetic.
- */
-considered: number, 
-/**
- * Something about *these repositories* that the action's own words cannot
- * say, because it is not a property of the action.
- *
- * `stage_all` sweeping up forty-seven untracked files is the case this
- * exists for. "including untracked" is a property of the action and is in
- * the headline already; the *count* is a fact about the working set, and
- * it is the count that tells the user whether they are about to commit a
- * build directory.
- */
-warning: string | null, };
+export type Plan = { action: Action, eligible: Array<[RepoId, Action]>, skipped: Array<[RepoId, SkipReason]>, considered: number, warning: string | null, };

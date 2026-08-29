@@ -3,11 +3,4 @@ import type { Pass } from "./Pass";
 import type { Step } from "./Step";
 import type { StepState } from "./StepState";
 
-/**
- * One executed step, and where its output sits in the job's transcript.
- */
-export type StepRun = { step: Step, pass: Pass, state: StepState, 
-/**
- * A range into [`crate::Job::log`].
- */
-log: { start: number, end: number, }, };
+export type StepRun = { step: Step, pass: Pass, state: StepState, log: { start: number, end: number, }, };

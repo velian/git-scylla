@@ -2,8 +2,5 @@
 
 /**
  * The template substitution set.
- *
- * Served rather than restated on the other side: help text that repeats a
- * table is help text that goes stale.
  */
 export type Placeholder = { token: string, means: string, };

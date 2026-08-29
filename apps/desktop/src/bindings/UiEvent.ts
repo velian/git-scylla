@@ -5,14 +5,8 @@ import type { Event } from "./Event";
 import type { RepoRow } from "./RepoRow";
 
 /**
- * What the webview receives.
- *
- * Everything the engine publishes, except that snapshots arrive as **rows**:
- * the grid needs the derived `Badge` for display and for its default sort, and
- * deriving it in TypeScript would put a piece of the domain in the frontend.
- *
- * A wrapper rather than a parallel copy of `Event`, so the enum's shape is
- * written down once and a passthrough arm cannot fall behind it.
+ * What the webview receives: `Event`, except snapshots arrive as grid rows
+ * and a finished batch carries its rendered summary line.
  */
 export type UiEvent = { "type": "Rows", "value": Array<RepoRow> } | { "type": "BatchDone", "value": { id: BatchId, summary: BatchSummary, 
 /**

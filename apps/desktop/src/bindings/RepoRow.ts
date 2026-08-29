@@ -13,48 +13,28 @@ import type { Upstream } from "./Upstream";
 import type { WorkTree } from "./WorkTree";
 
 /**
- * A snapshot plus what the grid derives from it.
- *
- * `#[serde(flatten)]` so the wire shape is one flat object — a row is a
- * repository with two extra columns, not a repository wrapped in something.
+ * A snapshot plus what the grid derives from it. `#[serde(flatten)]` keeps
+ * the wire shape one flat object: a row is a repository with extra columns.
  */
 export type RepoRow = { badge: Badge, 
 /**
- * The badge as a word, from `Badge`'s `Display`.
- *
- * Carried rather than derived on the other side, which had been
- * lowercasing the variant name — a transliteration that holds only while
- * every variant is a single word, and `InProgress` lowercases to
- * `inprogress`. Phrasing a domain value is Rust's job here as everywhere
- * else, and this is also the CSS class, so the two cannot disagree.
+ * The badge as a word, from `Badge`'s `Display`. Also the CSS class.
  */
 badge_label: string, 
 /**
- * Not verified by the running process, or verified too long ago.
- *
- * Derived here rather than in the grid for the same reason `badge` is, and
- * with an extra one: this is the *same* predicate the `SnapshotStale`
- * precondition uses, so a row shown as current can never be one an action
- * then refuses as stale. Two spellings of "stale" would let the tool
- * contradict itself on screen.
+ * Not verified by the running process, or verified too long ago. The
+ * same predicate the `SnapshotStale` precondition uses.
  */
 stale: boolean, 
 /**
- * Sort priority, worst first.
- *
- * Sent as a number because the ordering lives in the declaration order of
- * [`Badge`], which a TypeScript string union cannot express. A hand-kept
- * array of badge names on the other side would be that ordering written
- * down twice, and the second copy would be the one that rots.
+ * Sort priority, worst first. A number because the ordering is
+ * [`Badge`]'s declaration order, which a TypeScript string union cannot
+ * express.
  */
 badge_rank: number, 
 /**
- * The compact status column, from `RepoSnapshot::status_line`.
- *
- * The same string the CLI's STATUS column shows, because it is the same
- * column. It was written twice — once here in Rust and once in
- * `columns.ts` — and the two had already parted company over what a bare
- * repository with an upstream should read as.
+ * The compact status column, from `RepoSnapshot::status_line` — the
+ * same string the CLI's STATUS column shows.
  */
 status: string, fetch_cell: FetchCell, id: RepoId, path: string, kind: RepoKind, head: Head, 
 /**

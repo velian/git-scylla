@@ -164,6 +164,7 @@ impl Probe for GitCliProbe {
 }
 
 fn answer_refs(req: &RefRequest, query: &RefQuery) -> Result<RefAnswer, RefError> {
+    let common_dir = resolve_common_dir(&req.per_worktree_dir);
     match std::fs::metadata(&common_dir) {
         Ok(m) if m.is_dir() => {}
         Ok(_) => return Err(RefError::NotADirectory { path: common_dir }),

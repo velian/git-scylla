@@ -2,7 +2,4 @@
 import type { RepoId } from "./RepoId";
 import type { SkipReason } from "./SkipReason";
 
-/**
- * Skips sharing one reason, expandable to the repository list.
- */
 export type SkipGroup = { reason: SkipReason, repos: Array<RepoId>, };
