@@ -4,7 +4,7 @@ import { asBridgeError, engine } from "./engine/client";
 import { summarise, type RootSummary } from "./roots";
 import { useScan, type Progress } from "./useScan";
 import { useRoots } from "./useRoots";
-import { Grid, type Sort } from "./Grid";
+import { Grid, type GridHandle, type Sort } from "./Grid";
 import { ActionBar } from "./ActionBar";
 import { PlanSheet } from "./PlanSheet";
 import { Drawer } from "./Drawer";
@@ -39,6 +39,7 @@ export default function App() {
   const [filterError, setFilterError] = useState<string | null>(null);
   const [sort, setSort] = useState<Sort>({ key: "badge", dir: "asc" });
   const filterBox = useRef<HTMLInputElement>(null);
+  const gridRef = useRef<GridHandle>(null);
   const [sheet, setSheet] = useState<Sheet | null>(null);
   const [planning, setPlanning] = useState(false);
   const [undoing, setUndoing] = useState<BatchId | null>(null);
@@ -338,6 +339,12 @@ export default function App() {
               placeholder="Filter — behind:>0 &amp; !dirty"
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "ArrowDown" || e.key === "Enter") {
+                  e.preventDefault();
+                  gridRef.current?.focusFirst();
+                }
+              }}
               spellCheck={false}
             />
             {filterError && <span className="filter__error">{filterError}</span>}
@@ -362,6 +369,7 @@ export default function App() {
             </p>
           )}
           <Grid
+            ref={gridRef}
             rows={shown}
             roots={roots.paths}
             selected={selected}

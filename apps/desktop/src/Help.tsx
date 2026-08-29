@@ -14,6 +14,7 @@ const HOTKEYS: { keys: string; label: string }[][] = [
   ],
   [
     { keys: "⌘F", label: "Focus the filter" },
+    { keys: "↓ / ⏎", label: "From the filter, jump into the grid" },
     { keys: "⌘R", label: "Refresh selection (or rescan)" },
     { keys: "⌘⇧R", label: "Rescan roots" },
     { keys: "⌘O", label: "Add root…" },

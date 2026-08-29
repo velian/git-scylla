@@ -3,11 +3,11 @@
  */
 
 /** Tests the grid's click, keyboard, and context-menu handling, through rendered DOM and real event sequences. */
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Grid, type Sort } from "./Grid";
+import { Grid, type GridHandle, type Sort } from "./Grid";
 import type { RepoId, RepoRow } from "./bindings";
 
 // The real client reaches for Tauri internals that do not exist under jsdom.
@@ -53,6 +53,35 @@ function Harness({ rows = ROWS }: { rows?: RepoRow[] }) {
     <div>
       <button>outside</button>
       <Grid
+        rows={rows}
+        roots={["/work"]}
+        selected={selected}
+        onSelected={setSelected}
+        onError={() => {}}
+        sort={sort}
+        onSort={setSort}
+      />
+    </div>
+  );
+}
+
+function FilterAndGrid({ rows = ROWS }: { rows?: RepoRow[] }) {
+  const [selected, setSelected] = useState<Set<RepoId>>(new Set());
+  const [sort, setSort] = useState<Sort>({ key: "name", dir: "asc" });
+  const gridRef = useRef<GridHandle>(null);
+  return (
+    <div>
+      <input
+        aria-label="filter"
+        onKeyDown={(e) => {
+          if (e.key === "ArrowDown" || e.key === "Enter") {
+            e.preventDefault();
+            gridRef.current?.focusFirst();
+          }
+        }}
+      />
+      <Grid
+        ref={gridRef}
         rows={rows}
         roots={["/work"]}
         selected={selected}
@@ -135,6 +164,40 @@ describe("the keyboard cursor", () => {
     await user.tab();
 
     expect(rowFor("alpha").className).toContain("is-cursor");
+  });
+});
+
+describe("handing off from the filter box", () => {
+  it("focuses the first row on ArrowDown", async () => {
+    const user = userEvent.setup();
+    render(<FilterAndGrid />);
+
+    await user.click(screen.getByLabelText("filter"));
+    await user.keyboard("{ArrowDown}");
+
+    expect(rowFor("alpha").className).toContain("is-cursor");
+    expect(document.activeElement?.getAttribute("role")).toEqual("grid");
+  });
+
+  it("focuses the first row on Enter", async () => {
+    const user = userEvent.setup();
+    render(<FilterAndGrid />);
+
+    await user.click(screen.getByLabelText("filter"));
+    await user.keyboard("{Enter}");
+
+    expect(rowFor("alpha").className).toContain("is-cursor");
+    expect(document.activeElement?.getAttribute("role")).toEqual("grid");
+  });
+
+  it("does nothing when there are no rows to land on", async () => {
+    const user = userEvent.setup();
+    render(<FilterAndGrid rows={[]} />);
+
+    await user.click(screen.getByLabelText("filter"));
+    await user.keyboard("{ArrowDown}");
+
+    expect(document.activeElement?.getAttribute("aria-label")).toEqual("filter");
   });
 });
 

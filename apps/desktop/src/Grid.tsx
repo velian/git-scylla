@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { RepoId, RepoRow } from "./bindings";
 import {
   branch,
@@ -24,6 +31,10 @@ const COLUMNS: { key: SortKey; label: string; className: string }[] = [
 
 export type Sort = { key: SortKey; dir: SortDir };
 
+export type GridHandle = {
+  focusFirst: () => void;
+};
+
 type Props = {
   rows: RepoRow[];
   roots: string[];
@@ -34,8 +45,10 @@ type Props = {
   onSort: (next: Sort) => void;
 };
 
-/** The repository grid. No virtualization: under a hundred rows it buys nothing. */
-export function Grid({ rows, roots, selected, onSelected, onError, sort, onSort }: Props) {
+export const Grid = forwardRef<GridHandle, Props>(function Grid(
+  { rows, roots, selected, onSelected, onError, sort, onSort },
+  ref,
+) {
   const [anchor, setAnchor] = useState<RepoId | null>(null);
   const [menu, setMenu] = useState<{ row: RepoRow; x: number; y: number } | null>(null);
   const [cursor, setCursor] = useState<RepoId | null>(null);
@@ -51,6 +64,19 @@ export function Grid({ rows, roots, selected, onSelected, onError, sort, onSort 
   useEffect(() => {
     cursorRow.current?.scrollIntoView({ block: "nearest" });
   }, [cursor]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      focusFirst() {
+        if (sorted.length === 0) return;
+        setCursor(sorted[0].id);
+        setAnchor(sorted[0].id);
+        container.current?.focus();
+      },
+    }),
+    [sorted],
+  );
 
   function toggleSort(key: SortKey) {
     onSort(sort.key === key ? { key, dir: sort.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" });
@@ -229,7 +255,7 @@ export function Grid({ rows, roots, selected, onSelected, onError, sort, onSort 
       {menu && <RowMenu {...menu} onClose={() => setMenu(null)} onError={onError} />}
     </div>
   );
-}
+});
 
 function RowMenu({
   row,
