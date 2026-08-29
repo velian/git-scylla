@@ -67,7 +67,7 @@ impl GitCliProbe {
                 let msg = if out.stderr.is_empty() {
                     match out.stop {
                         Stop::Cancelled => "cancelled".to_string(),
-                        _ => format!("git status exited {}", out.code.map_or(-1, |c| c)),
+                        _ => format!("git status exited {}", out.code.unwrap_or(-1)),
                     }
                 } else {
                     out.stderr
