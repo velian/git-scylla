@@ -38,6 +38,7 @@ const STATUS_ICONS: { icon: string; label: string }[] = [
 
 const FILTER_KEYS: { key: string; label: string }[] = [
   { key: "dirty", label: "Bare badge name (also: badge:dirty)" },
+  { key: "bare word", label: "Any other bare word fuzzy-matches the name" },
   { key: "badge:name", label: "conflict, in-progress, diverged, behind, ahead, dirty, staged, clean, unreachable, unknown" },
   { key: "branch:glob", label: "Branch name" },
   { key: "name:glob", label: "Repository name" },

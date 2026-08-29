@@ -3,12 +3,14 @@
 //!
 //! ```text
 //! expr   := term ('&' term)*
-//! term   := '!'? (key ':' value | badge)
+//! term   := '!'? (key ':' value | badge | fuzzy)
 //! key    := badge | branch | name | path | kind | upstream | op
 //!         | ahead | behind | staged | modified | untracked | conflicted | stashes
 //! value  := glob | keyword | comparison
 //! cmp    := ('>' | '>=' | '<' | '<=' | '=')? number
 //! glob   := literal with '*' (any run) and '?' (any one)
+//! fuzzy  := a bare word that is not a recognized badge, matched against the
+//!           repository name as a case-insensitive subsequence
 //! ```
 
 use crate::{Badge, Head, InProgress, RepoKind, RepoSnapshot};
@@ -34,8 +36,6 @@ pub enum FilterError {
     UnknownOp(String),
     #[error("{0:?} is not a number or comparison")]
     BadComparison(String),
-    #[error("bare word {0:?} is not a badge; did you mean a key:value term?")]
-    BareWord(String),
 }
 
 /// A conjunction of terms. Every term must match.
@@ -52,6 +52,7 @@ pub enum Term {
     Badge(Badge),
     Branch(Glob),
     Name(Glob),
+    NameFuzzy(String),
     Path(Glob),
     Kind(KindMatch),
     Upstream(UpstreamMatch),
@@ -69,16 +70,12 @@ pub enum KindMatch {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpstreamMatch {
-    /// No upstream configured at all.
     None,
-    /// Configured, but the remote-tracking ref is gone.
     Gone,
-    /// Configured and resolvable.
     Set,
     Ahead,
     Behind,
     Diverged,
-    /// Configured, resolvable, and level.
     InSync,
 }
 
@@ -119,7 +116,6 @@ impl Filter {
         Self::parse_with_home(expr, None)
     }
 
-    /// `home` expands a leading `~/` in a `path:` glob.
     pub fn parse_with_home(expr: &str, home: Option<&Path>) -> Result<Self, FilterError> {
         if expr.trim().is_empty() {
             return Err(FilterError::Empty);
@@ -143,7 +139,6 @@ impl Filter {
         Ok(Self { source, terms })
     }
 
-    /// The expression this was parsed from.
     pub fn source(&self) -> &str {
         &self.source
     }
@@ -163,9 +158,6 @@ impl std::fmt::Display for Filter {
     }
 }
 
-/// On the wire a filter **is** its source text.
-///
-/// `~/` is not expanded here; use [`Filter::parse_with_home`] for that.
 impl serde::Serialize for Filter {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&self.source)
@@ -182,10 +174,10 @@ impl<'de> serde::Deserialize<'de> for Filter {
 impl Term {
     fn parse(body: &str, home: Option<&Path>) -> Result<Self, FilterError> {
         let Some((key, value)) = body.split_once(':') else {
-            return match parse_badge(body) {
-                Some(b) => Ok(Term::Badge(b)),
-                None => Err(FilterError::BareWord(body.to_string())),
-            };
+            return Ok(match parse_badge(body) {
+                Some(b) => Term::Badge(b),
+                None => Term::NameFuzzy(body.to_string()),
+            });
         };
         let value = value.trim();
         match key.trim().to_ascii_lowercase().as_str() {
@@ -246,6 +238,7 @@ impl Term {
                 Head::Detached(_) => false,
             },
             Term::Name(g) => g.matches(s.id.name()),
+            Term::NameFuzzy(needle) => fuzzy_match(needle, s.id.name()),
             Term::Path(g) => g.matches(&s.path.to_string_lossy()),
             Term::Kind(k) => matches!(
                 (k, &s.kind),
@@ -332,9 +325,6 @@ fn expand_home(v: &str, home: Option<&Path>) -> String {
     }
 }
 
-/// `*` matches any run of characters, `?` exactly one. Nothing else.
-///
-/// A pattern with no wildcard is an exact match, not a substring match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Glob(String);
 
@@ -348,7 +338,11 @@ impl Glob {
     }
 }
 
-/// Iterative backtracking: cannot blow the stack on a pathological pattern.
+fn fuzzy_match(needle: &str, haystack: &str) -> bool {
+    let mut hay = haystack.chars().flat_map(char::to_lowercase);
+    needle.chars().flat_map(char::to_lowercase).all(|n| hay.by_ref().any(|h| h == n))
+}
+
 fn glob_match(pat: &[u8], text: &[u8]) -> bool {
     let (mut p, mut t) = (0usize, 0usize);
     let (mut star, mut resume) = (None, 0usize);
@@ -368,7 +362,6 @@ fn glob_match(pat: &[u8], text: &[u8]) -> bool {
                 t += 1;
             }
             _ => match star {
-                // Backtrack: let the last '*' swallow one more character.
                 Some(sp) => {
                     p = sp + 1;
                     resume += 1;
@@ -494,7 +487,7 @@ mod tests {
 
     #[test]
     fn a_malformed_expression_cannot_arrive_over_the_wire() {
-        assert!(serde_json::from_str::<Filter>(r#""drity""#).is_err());
+        assert!(serde_json::from_str::<Filter>(r#""brunch:main""#).is_err());
         assert!(serde_json::from_str::<Filter>(r#""""#).is_err());
     }
 
@@ -514,6 +507,16 @@ mod tests {
             Filter::parse("behind:lots").unwrap_err(),
             FilterError::BadComparison("lots".into())
         );
-        assert_eq!(Filter::parse("drity").unwrap_err(), FilterError::BareWord("drity".into()));
+    }
+
+    #[test]
+    fn an_unrecognized_bare_word_fuzzy_matches_the_name() {
+        let s = snap("/Users/x/work/git-scyllae", "main");
+        assert!(Filter::parse("scyll").unwrap().matches(&s), "not a badge, falls back to fuzzy");
+        assert!(Filter::parse("SCYLL").unwrap().matches(&s), "case-insensitive");
+        assert!(Filter::parse("gitae").unwrap().matches(&s), "characters may skip over a gap");
+        assert!(!Filter::parse("drity").unwrap().matches(&s), "no 'd' anywhere in the name");
+        assert!(!Filter::parse("zzz").unwrap().matches(&s));
+        assert!(!Filter::parse("scyllax").unwrap().matches(&s), "needle longer than any match");
     }
 }

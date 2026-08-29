@@ -237,12 +237,12 @@ fn a_failure_crosses_as_kind_and_message_not_a_debug_string() {
         "plan",
         json!({
             "action": Action::Fetch { prune: false, tags: false },
-            "selection": { "type": "Filter", "value": "drity" },
+            "selection": { "type": "Filter", "value": "brunch:main" },
         }),
     )
     .expect_err("a bad filter must not become an empty selection");
     let text = err.to_string();
-    assert!(text.contains("not a badge"), "the reason should survive the trip: {text}");
+    assert!(text.contains("unknown key"), "the reason should survive the trip: {text}");
 
     let structured = serde_json::to_value(git_scylla_desktop_lib::BridgeError::new(
         git_scylla_desktop_lib::ErrorKind::EngineStopped,
@@ -368,9 +368,15 @@ fn the_filter_box_is_evaluated_by_the_engines_parser() {
     let all = call(&window, "select_repos", json!({ "expr": "branch:main" })).unwrap();
     assert_eq!(all.as_array().unwrap().len(), 3);
 
-    let err = call(&window, "select_repos", json!({ "expr": "drity" })).expect_err("bad expr");
+    let fuzzy = call(&window, "select_repos", json!({ "expr": "1" })).expect("select_repos");
+    let fuzzy_ids = fuzzy.as_array().unwrap();
+    assert_eq!(fuzzy_ids.len(), 1);
+    assert!(fuzzy_ids[0].as_str().unwrap().ends_with("r1"));
+
+    let err =
+        call(&window, "select_repos", json!({ "expr": "brunch:main" })).expect_err("bad expr");
     assert_eq!(err["kind"], "BadSelection", "{err}");
-    assert!(err["message"].as_str().unwrap().contains("not a badge"), "{err}");
+    assert!(err["message"].as_str().unwrap().contains("unknown key"), "{err}");
 }
 
 #[test]

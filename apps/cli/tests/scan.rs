@@ -40,8 +40,6 @@ fn make_repos(dir: &Path, n: usize) -> Vec<PathBuf> {
             std::fs::write(repo.join("a.txt"), "a\n").unwrap();
             git(&["add", "a.txt"]);
             git(&["commit", "-m", "c1"]);
-            // Every third repository is dirty, so the filter test has something
-            // to select and the count is predictable.
             if i % 3 == 0 {
                 std::fs::write(repo.join("b.txt"), "b\n").unwrap();
             }
@@ -59,7 +57,6 @@ fn json_is_a_list_of_snapshots_with_the_documented_shape() {
     let rows = json(&[dir.to_str().unwrap(), "--json"]);
     assert_eq!(rows.len(), 3);
     for row in &rows {
-        // The fields the generated TypeScript depends on.
         for key in [
             "id",
             "path",
@@ -80,9 +77,7 @@ fn json_is_a_list_of_snapshots_with_the_documented_shape() {
         assert_eq!(row["head"]["type"], "Branch");
         assert_eq!(row["head"]["value"], "main");
         assert_eq!(row["outcome"]["type"], "Ok");
-        // No remote, so automatic fetching is disabled rather than pending.
         assert_eq!(row["fetch"]["schedule"]["type"], "Disabled");
-        // Timestamps are Unix milliseconds, not serde's {secs, nanos} map.
         assert!(row["probed_at"].is_i64(), "probed_at should be millis: {}", row["probed_at"]);
     }
 }
@@ -102,17 +97,33 @@ fn filter_selects_and_a_bad_filter_is_a_usage_error() {
     let none = json(&[dir.to_str().unwrap(), "--json", "--filter", "behind:>0"]);
     assert!(none.is_empty(), "no repository has an upstream");
 
-    // A typo must be an error, not a silently empty result.
-    let bad = scan(&[dir.to_str().unwrap(), "--filter", "drity"]);
+    let typo = json(&[dir.to_str().unwrap(), "--json", "--filter", "drity"]);
+    assert!(typo.is_empty());
+
+    let bad = scan(&[dir.to_str().unwrap(), "--filter", "brunch:main"]);
     assert_eq!(bad.status.code(), Some(3));
     assert!(String::from_utf8_lossy(&bad.stderr).contains("bad --select"));
+}
+
+#[test]
+fn a_bare_word_fuzzy_matches_the_repository_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    make_repos(&dir, 1);
+    let found = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap();
+    std::fs::rename(found.path(), dir.join("git-scyllae")).unwrap();
+
+    let hit = json(&[dir.to_str().unwrap(), "--json", "--filter", "scyll"]);
+    assert_eq!(hit.len(), 1, "scyll is a subsequence of git-scyllae");
+
+    let miss = json(&[dir.to_str().unwrap(), "--json", "--filter", "zzz"]);
+    assert!(miss.is_empty());
 }
 
 #[test]
 fn scan_is_a_report_so_it_always_exits_zero() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().canonicalize().unwrap();
-    // Nothing to find is not a failure.
     let empty = scan(&[dir.to_str().unwrap()]);
     assert_eq!(empty.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&empty.stdout).contains("no repositories found"));
@@ -120,8 +131,6 @@ fn scan_is_a_report_so_it_always_exits_zero() {
     make_repos(&dir, 1);
     assert_eq!(scan(&[dir.to_str().unwrap()]).status.code(), Some(0));
 
-    // A root that does not exist is a configuration error, and the only thing
-    // that is not exit 0.
     let missing = scan(&["/nope/nope/nope"]);
     assert_eq!(missing.status.code(), Some(3));
 }
@@ -143,32 +152,10 @@ fn logs_go_to_stderr_so_json_stays_pipeable() {
 
 #[test]
 fn a_hundred_repositories_scan_in_about_the_target_time() {
-    // The target is a warm 100-repository scan under 1 s. Measured on an
-    // 8-core M-series machine: 0.64 s release, 0.75 s debug.
-    //
-    // That number is essentially all `git status` process cost. 100 sequential
-    // invocations take ~2.0 s on the same machine and a shell `xargs -P8` doing
-    // the same work takes 0.88 s, so the scan is already faster than the obvious
-    // baseline and raising concurrency past `available_parallelism()` changes
-    // nothing — it is bound by fork/exec, not by our scheduling.
-    //
-    // Which means the margin against the 1 s target is thin and belongs to the
-    // machine, not to this code — and "the machine" includes its power state.
-    // The same hundred repositories measured 0.64 s on mains and 0.92 s on
-    // battery, while a hundred bare `git status` spawns at 8x concurrency moved
-    // from ~0.55 s to ~0.83 s alongside it. The scan stayed ~90 ms above that
-    // floor throughout; only the floor moved.
-    //
-    // So the assertion below is a regression guard with room for a throttled
-    // laptop and a loaded CI runner. A real regression in the scan pipeline —
-    // accidental serialization, a second subprocess per repository — costs
-    // multiples of this, not percent.
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().canonicalize().unwrap();
     make_repos(&dir, 100);
 
-    // Warm: one throwaway run so the page cache and the index are hot, which is
-    // the "warm" in the target.
     let _ = json(&[dir.to_str().unwrap(), "--json"]);
 
     let started = Instant::now();
@@ -176,7 +163,6 @@ fn a_hundred_repositories_scan_in_about_the_target_time() {
     let elapsed = started.elapsed();
     assert_eq!(rows.len(), 100);
 
-    // Whole-process, so it includes binary startup and JSON serialization.
     assert!(
         elapsed.as_millis() < 3000,
         "scanning 100 repositories took {elapsed:?}; the target is under 1 s and \

@@ -273,17 +273,20 @@ One parser, shared by the CLI's `--filter` and the desktop filter box.
 
 ```text
 expr   := term ('&' term)*
-term   := '!'? (key ':' value | badge)
+term   := '!'? (key ':' value | badge | fuzzy)
 key    := badge | branch | name | path | kind | upstream | op
         | ahead | behind | staged | modified | untracked | conflicted | stashes
 value  := glob | keyword | comparison
 cmp    := ('>' | '>=' | '<' | '<=' | '=')? number
 glob   := literal with '*' (any run) and '?' (any one)
+fuzzy  := a bare word that is not a recognized badge, matched as a
+          case-insensitive subsequence of the repository name
 ```
 
-No `|`, no parentheses, no precedence. Every term must match. A bare word is
-accepted only as a badge, so `dirty` works; any other bare word is an error
-rather than a term that silently matches nothing.
+No `|`, no parentheses, no precedence. Every term must match. A bare word that
+names a badge is that badge, so `dirty` works; any other bare word falls back
+to a fuzzy match against the repository name, so `scyll` finds `git-scyllae`
+rather than erroring.
 
 A `Filter` keeps its source text and serializes as that text. Deserializing
 re-parses, so a malformed expression cannot cross a boundary and become a filter
