@@ -2,11 +2,4 @@
 import type { Plan } from "./Plan";
 import type { PlanView } from "./PlanView";
 
-/**
- * What a batch would do, plus the strings that describe it.
- */
-export type PlanSheet = { 
-/**
- * Opaque to the frontend; goes back to [`start_batch`] unmodified.
- */
-plan: Plan, view: PlanView, };
+export type PlanSheet = { plan: Plan, view: PlanView, };
