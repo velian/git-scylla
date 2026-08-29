@@ -9,6 +9,7 @@ import { ActionBar } from "./ActionBar";
 import { PlanSheet } from "./PlanSheet";
 import { Drawer } from "./Drawer";
 import { Settings } from "./Settings";
+import { Help } from "./Help";
 import * as jobs from "./jobs";
 import type { BatchView } from "./jobs";
 import type {
@@ -44,6 +45,7 @@ export default function App() {
   const [batches, setBatches] = useState<jobs.Drawer>(jobs.EMPTY);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [placeholders, setPlaceholders] = useState<Placeholder[]>([]);
   useEffect(() => {
@@ -285,6 +287,13 @@ export default function App() {
         </span>
         {scanning && <ScanProgress progress={progress} />}
         <button
+          className="titlebar__help"
+          onClick={() => setHelpOpen((open) => !open)}
+          aria-label={helpOpen ? "Hide help" : "Show help"}
+        >
+          ?
+        </button>
+        <button
           className="titlebar__settings"
           onClick={() => setSettingsOpen(true)}
           aria-label="Settings"
@@ -359,6 +368,7 @@ export default function App() {
             onSort={setSort}
           />
         </main>
+        {helpOpen && <Help onClose={() => setHelpOpen(false)} />}
       </div>
       <Drawer
         state={batches}
