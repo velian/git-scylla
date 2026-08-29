@@ -44,6 +44,7 @@ export default function App() {
   const [batches, setBatches] = useState<jobs.Drawer>(jobs.EMPTY);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [placeholders, setPlaceholders] = useState<Placeholder[]>([]);
   useEffect(() => {
     engine.templatePlaceholders().then(setPlaceholders).catch(() => {});
@@ -283,22 +284,37 @@ export default function App() {
           git-scylla
         </span>
         {scanning && <ScanProgress progress={progress} />}
+        <button
+          className="titlebar__settings"
+          onClick={() => setSettingsOpen(true)}
+          aria-label="Settings"
+        >
+          ⚙
+        </button>
       </div>
       <div className="body">
-        <aside className="sidebar">
+        <aside className={`sidebar${sidebarCollapsed ? " sidebar--collapsed" : ""}`}>
           <div className="sidebar__head">
-            <span>Roots</span>
-            <button onClick={() => void roots.add()}>Add…</button>
-            <button onClick={() => setSettingsOpen(true)} aria-label="Settings">
-              ⚙
+            {!sidebarCollapsed && <span>Roots</span>}
+            <button
+              className="sidebar__toggle"
+              onClick={() => setSidebarCollapsed((c) => !c)}
+              aria-label={sidebarCollapsed ? "Expand roots" : "Collapse roots"}
+            >
+              {sidebarCollapsed ? "›" : "‹"}
             </button>
+            {!sidebarCollapsed && <button onClick={() => void roots.add()}>Add…</button>}
           </div>
-          {summaries.length === 0 && <p className="sidebar__empty">None yet.</p>}
-          <ul className="sidebar__list">
-            {summaries.map((root) => (
-              <RootRow key={root.path} root={root} onRemove={() => void removeRoot(root.path)} />
-            ))}
-          </ul>
+          {!sidebarCollapsed && (
+            <>
+              {summaries.length === 0 && <p className="sidebar__empty">None yet.</p>}
+              <ul className="sidebar__list">
+                {summaries.map((root) => (
+                  <RootRow key={root.path} root={root} onRemove={() => void removeRoot(root.path)} />
+                ))}
+              </ul>
+            </>
+          )}
         </aside>
         <main className="content">
           {failure && <p className="error">{failure}</p>}

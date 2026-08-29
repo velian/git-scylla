@@ -56,7 +56,6 @@ body {
 
 .content {
   padding: 32px;
-  max-width: 120ch;
 }
 
 h1 {
@@ -110,9 +109,21 @@ p {
 
 .titlebar__status {
   margin-left: auto;
-  margin-right: 16px;
   color: var(--fg-dim);
   font-size: 12px;
+}
+
+.titlebar__settings {
+  margin-left: auto;
+  margin-right: 16px;
+  font: inherit;
+  font-size: 14px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
 }
 
 .body {
@@ -127,6 +138,13 @@ p {
   border-right: 1px solid var(--line);
   padding: 12px;
   overflow-y: auto;
+  transition: width 150ms ease, padding 150ms ease;
+}
+
+.sidebar--collapsed {
+  width: 28px;
+  padding: 12px 4px;
+  overflow: hidden;
 }
 
 .sidebar__head {
@@ -139,6 +157,21 @@ p {
   letter-spacing: 0.04em;
   color: var(--fg-dim);
   margin-bottom: 8px;
+}
+
+.sidebar--collapsed .sidebar__head {
+  justify-content: center;
+}
+
+.sidebar__toggle {
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
 }
 
 .sidebar__head button,
@@ -360,7 +393,7 @@ p {
 .col-branch { max-width: 20ch; font-family: "SF Mono", ui-monospace, monospace; font-size: 12px; }
 .col-badge { width: 12ch; }
 .col-status { font-family: "SF Mono", ui-monospace, monospace; font-size: 12px; }
-.col-fetch { color: var(--fg-dim); font-size: 12px; text-align: right; }
+.col-fetch { color: var(--fg-dim); font-size: 12px; }
 .col-fetch.is-problem { color: #ff9f0a; }
 
 .badge {
