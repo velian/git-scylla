@@ -36,6 +36,31 @@ const STATUS_ICONS: { icon: string; label: string }[] = [
   { icon: "[timeout]", label: "The probe timed out" },
 ];
 
+const FILTER_KEYS: { key: string; label: string }[] = [
+  { key: "dirty", label: "Bare badge name (also: badge:dirty)" },
+  { key: "badge:name", label: "conflict, in-progress, diverged, behind, ahead, dirty, staged, clean, unreachable, unknown" },
+  { key: "branch:glob", label: "Branch name" },
+  { key: "name:glob", label: "Repository name" },
+  { key: "path:glob", label: "Path (~/ expands)" },
+  { key: "kind:k", label: "normal, bare, worktree, submodule" },
+  { key: "upstream:s", label: "none, gone, set, ahead, behind, diverged, ok" },
+  { key: "op:o", label: "any, merge, rebase, cherry-pick, revert, bisect" },
+  { key: "ahead:cmpN", label: "Commits ahead of upstream" },
+  { key: "behind:cmpN", label: "Commits behind upstream" },
+  { key: "staged:cmpN", label: "Staged file count" },
+  { key: "modified:cmpN", label: "Modified file count" },
+  { key: "untracked:cmpN", label: "Untracked file count" },
+  { key: "conflicted:cmpN", label: "Conflicted file count" },
+  { key: "stashes:cmpN", label: "Stash count" },
+];
+
+const FILTER_SYNTAX: { key: string; label: string }[] = [
+  { key: "&", label: "Combine terms (AND)" },
+  { key: "!", label: "Negate a term" },
+  { key: "* ?", label: "Glob: any run / one character" },
+  { key: "cmp", label: "> >= < <= = (default =) before a number" },
+];
+
 export function Help({ onClose }: { onClose: () => void }) {
   return (
     <aside className="help">
@@ -67,6 +92,29 @@ export function Help({ onClose }: { onClose: () => void }) {
             <div key={icon} className="help__row">
               <dt>
                 <kbd>{icon}</kbd>
+              </dt>
+              <dd>{label}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+      <section className="help__section">
+        <h3>Filter verbs</h3>
+        <dl className="help__list">
+          {FILTER_KEYS.map(({ key, label }) => (
+            <div key={key} className="help__row">
+              <dt>
+                <kbd>{key}</kbd>
+              </dt>
+              <dd>{label}</dd>
+            </div>
+          ))}
+        </dl>
+        <dl className="help__list">
+          {FILTER_SYNTAX.map(({ key, label }) => (
+            <div key={key} className="help__row">
+              <dt>
+                <kbd>{key}</kbd>
               </dt>
               <dd>{label}</dd>
             </div>
