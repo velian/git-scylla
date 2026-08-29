@@ -3,23 +3,29 @@ import { useEffect, useState } from "react";
 import { engine } from "./engine/client";
 import type { CustomCommand } from "./bindings";
 
+const DEFAULT_FETCH_INTERVAL_MINUTES = 15;
+
 export function Settings({
   custom,
   editor,
   terminal,
+  fetchIntervalSecs,
   onSave,
   onRemove,
   onSetEditor,
   onSetTerminal,
+  onSetFetchInterval,
   onClose,
 }: {
   custom: CustomCommand[];
   editor: string | null;
   terminal: string | null;
+  fetchIntervalSecs: number | null;
   onSave: (command: CustomCommand) => void;
   onRemove: (name: string) => void;
   onSetEditor: (editor: string | null) => void;
   onSetTerminal: (terminal: string | null) => void;
+  onSetFetchInterval: (secs: number | null) => void;
   onClose: () => void;
 }) {
   const [draft, setDraft] = useState<CustomCommand | null>(null);
@@ -84,6 +90,29 @@ export function Settings({
       </section>
 
       <section>
+        <h3>Fetch frequency</h3>
+        <p className="muted">
+          How often each repository is fetched in the background, in minutes.
+          Applies right away, no restart needed.
+        </p>
+        <input
+          type="number"
+          min={1}
+          step={1}
+          value={fetchIntervalSecs === null ? "" : Math.round(fetchIntervalSecs / 60)}
+          placeholder={String(DEFAULT_FETCH_INTERVAL_MINUTES)}
+          onChange={(e) => {
+            const minutes = e.target.value.trim() === "" ? null : Number(e.target.value);
+            onSetFetchInterval(
+              minutes === null || !Number.isFinite(minutes) || minutes < 1
+                ? null
+                : Math.round(minutes * 60),
+            );
+          }}
+        />
+      </section>
+
+      <section>
         <h3>Custom commands</h3>
         <p className="muted">
           An argv, never a shell string: there is no shell, no interpolation and
@@ -145,8 +174,6 @@ function Editor({
   onSave: () => void;
   onCancel: () => void;
 }) {
-  // Edited as text and split on whitespace; an argument containing a space
-  // is the one case this cannot express.
   const [args, setArgs] = useState(draft.args.join(" "));
   const argv = args.split(/\s+/).filter(Boolean);
   const ready = draft.name.trim() !== "" && argv.length > 0;

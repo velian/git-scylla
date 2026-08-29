@@ -1,10 +1,4 @@
 //! Automatic fetching, against the engine.
-//!
-//! The schedule itself — backoff, quarantine, jitter — is a pure function and is
-//! tested in `policy.rs` by advancing a clock. What can only be asserted here is
-//! the part the engine owns: that it fetches without being asked, that it does
-//! not do so before the scan has settled, that it yields to the user, and that
-//! a fetch's outcome reaches the repository's health.
 
 use git_scylla_core::{Action, FetchSchedule, JobOrigin, JobState};
 use git_scylla_engine::{Config, Engine, EngineHandle, Event, FetchPolicy, Plan, Policy};
@@ -32,7 +26,6 @@ struct World {
     repos: PathBuf,
 }
 
-/// A bare origin with one commit, and `n` clones of it.
 fn world(dir: &Path, n: usize) -> World {
     std::fs::create_dir_all(dir).unwrap();
     let dir = dir.canonicalize().unwrap();
@@ -55,7 +48,6 @@ fn world(dir: &Path, n: usize) -> World {
 }
 
 impl World {
-    /// Push a commit into the origin. Nothing tells the clones.
     fn advance(&self) {
         let seed = self.dir.join("scratch/seed");
         let n = std::fs::read_to_string(seed.join("a.txt")).unwrap().len();
@@ -65,7 +57,6 @@ impl World {
     }
 }
 
-/// Fetch aggressively, so a test is seconds rather than a quarter of an hour.
 fn config(interval: Duration) -> Config {
     Config {
         extra_env: vec![
@@ -80,7 +71,6 @@ fn config(interval: Duration) -> Config {
     }
 }
 
-/// Poll until `pred` holds, or give up.
 async fn wait_for(
     h: &EngineHandle,
     within: Duration,
@@ -96,12 +86,8 @@ async fn wait_for(
     false
 }
 
-// ---- the headline claim ------------------------------------------------
-
 #[tokio::test(flavor = "multi_thread")]
 async fn behind_catches_up_with_no_user_action_at_all() {
-    // The headline claim: with no user interaction at all, every repository's
-    // `behind` count reflects its remote within one interval of a push.
     let tmp = tempfile::tempdir().unwrap();
     let w = world(tmp.path(), 3);
     let engine = Engine::start(config(Duration::from_millis(300)));
@@ -111,7 +97,6 @@ async fn behind_catches_up_with_no_user_action_at_all() {
     assert_eq!(snaps.len(), 3);
     assert!(snaps.iter().all(|s| s.upstream.as_ref().unwrap().behind() == Some(0)));
 
-    // Somebody pushes. Nothing tells the clones, and nobody presses anything.
     w.advance();
 
     assert!(
@@ -126,9 +111,6 @@ async fn behind_catches_up_with_no_user_action_at_all() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_initial_scan_issues_no_network_commands() {
-    // There is no fetch in the startup path, and adding one is a regression.
-    // Asserted through the job stream: a background fetch is a job, so "no job
-    // before `ScanDone`" is the property exactly.
     let tmp = tempfile::tempdir().unwrap();
     let w = world(tmp.path(), 4);
     let engine = Engine::start(config(Duration::from_millis(200)));
@@ -171,8 +153,6 @@ async fn a_fetch_records_its_outcome_against_the_repository() {
 async fn a_broken_remote_backs_off_and_keeps_its_reason() {
     let tmp = tempfile::tempdir().unwrap();
     let w = world(tmp.path(), 1);
-    // Point it somewhere that cannot work, without touching the network: a
-    // local path that is not a repository fails immediately and locally.
     let repo = w.repos.join("r00");
     let nowhere = w.dir.join("not-a-repo");
     std::fs::create_dir_all(&nowhere).unwrap();
@@ -223,8 +203,6 @@ async fn a_repository_with_no_remote_is_disabled_rather_than_perpetually_failing
 
 #[tokio::test(flavor = "multi_thread")]
 async fn background_fetching_yields_while_a_user_batch_runs() {
-    // Their batch has the permits and the priority. Adding background network
-    // work to it is how a fetch cycle becomes something the user can feel.
     let tmp = tempfile::tempdir().unwrap();
     let w = world(tmp.path(), 3);
     let engine = Engine::start(config(Duration::from_millis(150)));
@@ -256,8 +234,6 @@ async fn background_fetching_yields_while_a_user_batch_runs() {
             _ => continue,
         }
     }
-    // Ticks fired throughout — the batch takes three seconds and the tick is
-    // 150 ms — and every one of them declined.
     assert!(background.is_empty(), "background work ran during a user batch: {background:?}");
     engine.shutdown().await;
 }
@@ -282,13 +258,9 @@ async fn the_off_switch_means_nothing_fetches() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_users_own_fetch_clears_a_quarantine() {
-    // The reset button, and the only one. Driven through the engine rather than
-    // through `policy` so that the *routing* is asserted too: a user-origin
-    // fetch has to take the manual path.
     let tmp = tempfile::tempdir().unwrap();
     let w = world(tmp.path(), 1);
     let engine = Engine::start(Config {
-        // Off, so nothing races the manual fetch under test.
         fetch: FetchPolicy { enabled: false, ..FetchPolicy::default() },
         ..config(Duration::from_secs(900))
     });
@@ -324,8 +296,6 @@ async fn a_users_own_fetch_clears_a_quarantine() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_background_fetch_takes_the_ordinary_post_job_reprobe_path() {
-    // Nothing about the re-probe path changes for a background job: one
-    // re-probe, and the row catches up on its own.
     let tmp = tempfile::tempdir().unwrap();
     let w = world(tmp.path(), 1);
     let engine = Engine::start(config(Duration::from_millis(300)));
@@ -344,8 +314,33 @@ async fn a_background_fetch_takes_the_ordinary_post_job_reprobe_path() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn shrinking_the_interval_pulls_a_scheduled_fetch_forward() {
+    let tmp = tempfile::tempdir().unwrap();
+    let w = world(tmp.path(), 1);
+    let engine = Engine::start(config(Duration::from_secs(60)));
+    let h = engine.handle();
+    h.scan_to_completion(vec![w.repos.clone()], false).await.unwrap();
+
+    assert!(
+        wait_for(&h, Duration::from_secs(20), |snaps| snaps[0].fetch.last_success.is_some()).await,
+        "the first background fetch never completed"
+    );
+
+    h.set_fetch_interval(Duration::from_millis(300)).await.unwrap();
+    w.advance();
+
+    assert!(
+        wait_for(&h, Duration::from_secs(10), |snaps| {
+            snaps[0].upstream.as_ref().and_then(|u| u.behind()) == Some(1)
+        })
+        .await,
+        "the shrunk interval was not honored until the original 60s interval had passed"
+    );
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn background_transcripts_are_bounded() {
-    // A process that runs forever needs a ceiling on what it keeps.
     let tmp = tempfile::tempdir().unwrap();
     let w = world(tmp.path(), 2);
     let engine =
@@ -353,7 +348,6 @@ async fn background_transcripts_are_bounded() {
     let h = engine.handle();
     h.scan_to_completion(vec![w.repos.clone()], false).await.unwrap();
 
-    // Let several cycles run.
     tokio::time::sleep(Duration::from_secs(4)).await;
     let kept = h.background_jobs().await.unwrap();
     assert!(kept.len() <= 3, "kept {} background transcripts, bound is 3", kept.len());

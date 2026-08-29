@@ -3,34 +3,26 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Everything persisted between launches.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(default)]
 pub struct Config {
     pub roots: Vec<PathBuf>,
-    /// Application to open a repository in, by name as `open -a` understands
-    /// it — "Visual Studio Code", "Zed". `None` falls back to `$EDITOR`.
     pub editor: Option<String>,
-    /// Application to open a repository's terminal in, by name as `open -a`
-    /// understands it — "Ghostty", "iTerm". `None` is resolved by
-    /// `handoff::terminal_app`, which always has an answer.
     pub terminal: Option<String>,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
+    pub fetch_interval_secs: Option<u64>,
     pub custom: Vec<CustomCommand>,
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-/// One saved custom command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CustomCommand {
     pub name: String,
-    /// An argv vector, **never a shell string**.
     pub args: Vec<String>,
-    /// Which semaphore it takes, and whether `head_before` is recorded.
     pub network: bool,
     pub mutating: bool,
-    /// Persisted per definition: an edit to `args` clears it.
     pub acknowledged: bool,
 }
 
@@ -47,8 +39,6 @@ impl Default for CustomCommand {
 }
 
 impl Config {
-    /// Save or replace a custom command by name. An edit to `args` clears
-    /// `acknowledged`.
     pub fn put_custom(&mut self, mut command: CustomCommand) {
         match self.custom.iter_mut().find(|c| c.name == command.name) {
             Some(existing) => {
@@ -70,8 +60,6 @@ impl Config {
 }
 
 impl Config {
-    /// Add a root. Rejects one nested inside an existing root; a root that
-    /// contains existing ones replaces them. Returns whether anything changed.
     pub fn add_root(&mut self, root: PathBuf) -> bool {
         if self.roots.iter().any(|r| root.starts_with(r)) {
             return false;
@@ -95,7 +83,6 @@ pub fn path() -> Option<PathBuf> {
     git_scylla_store::path(FILE)
 }
 
-/// Read the stored configuration, or the default if missing or unreadable.
 pub fn load() -> Config {
     git_scylla_store::load_json(FILE).unwrap_or_default()
 }

@@ -1026,6 +1026,9 @@ button.primary:disabled {
 .settings input:not([type]) {
   width: 100%;
 }
+.settings input[type="number"] {
+  width: 6rem;
+}
 .settings__customs {
   list-style: none;
   padding: 0;

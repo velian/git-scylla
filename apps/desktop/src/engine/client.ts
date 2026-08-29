@@ -24,7 +24,6 @@ import type {
 const CHANNEL = "engine://events";
 const MENU = "menu://command";
 
-/** Narrows a failed `invoke` to the `BridgeError` shape Tauri rejects with. */
 export function asBridgeError(e: unknown): BridgeError {
   if (typeof e === "object" && e !== null && "kind" in e && "message" in e) {
     return e as BridgeError;
@@ -40,12 +39,10 @@ export const engine = {
 
   getSnapshot: (): Promise<RepoRow[]> => invoke("get_snapshot"),
 
-  /** Repositories matching a selection expression, parsed and evaluated in the engine. */
   selectRepos: (expr: string): Promise<RepoId[]> => invoke("select_repos", { expr }),
 
   refreshRepo: (id: RepoId): Promise<void> => invoke("refresh_repo", { id }),
 
-  /** `view` renders the sheet; `plan` is handed back to `startBatch` unmodified. */
   plan: (action: Action, selection: Selection): Promise<PlanSheet> =>
     invoke("plan", { action, selection }),
 
@@ -53,14 +50,12 @@ export const engine = {
 
   cancelBatch: (id: BatchId): Promise<void> => invoke("cancel_batch", { id }),
 
-  /** What undoing a finished batch would do. Returns through the same `PlanSheet` shape as any other action. */
   planUndo: (id: BatchId): Promise<PlanSheet> => invoke("plan_undo", { id }),
 
   startUndo: (id: BatchId, plan: Plan): Promise<BatchId> => invoke("start_undo", { id, plan }),
 
   jobLog: (id: JobId): Promise<LogLine[]> => invoke("job_log", { id }),
 
-  /** `null` when the user dismissed the picker. */
   pickRootDir: (): Promise<string | null> => invoke("pick_root_dir"),
 
   getConfig: (): Promise<Config> => invoke("get_config"),
@@ -74,11 +69,9 @@ export const engine = {
 
   setEditor: (editor: string | null): Promise<Config> => invoke("set_editor", { editor }),
 
-  /** `null` means resolve it automatically. */
   setTerminal: (terminal: string | null): Promise<Config> =>
     invoke("set_terminal", { terminal }),
 
-  /** What `Handoff::Terminal` would use right now. */
   resolvedTerminal: (): Promise<string> => invoke("resolved_terminal"),
 
   templatePlaceholders: (): Promise<Placeholder[]> => invoke("template_placeholders"),
@@ -89,11 +82,12 @@ export const engine = {
 
   acknowledgeCustom: (name: string): Promise<Config> => invoke("acknowledge_custom", { name }),
 
-  /** Opens one repository elsewhere. Not a job: no transcript, no undo. */
+  setFetchInterval: (secs: number | null): Promise<Config> =>
+    invoke("set_fetch_interval", { secs }),
+
   handOff: (what: Handoff, path: string): Promise<void> =>
     invoke("hand_off", { what, path }),
 
-  /** Fetch one repository without a plan sheet. Only `Fetch` may. */
   fetchNow: (id: RepoId): Promise<BatchId> => invoke("fetch_now", { id }),
 
   setHasSelection: (has: boolean): Promise<void> => invoke("set_has_selection", { has }),
@@ -101,7 +95,6 @@ export const engine = {
   onMenu: (handler: (command: MenuCommand) => void): Promise<UnlistenFn> =>
     listen<MenuCommand>(MENU, (e) => handler(e.payload)),
 
-  /** The Rust side batches on a 50ms tick; each delivery is an array of events. */
   onEvents: (handler: (events: UiEvent[]) => void): Promise<UnlistenFn> =>
     listen<UiEvent[]>(CHANNEL, (e) => handler(e.payload)),
 };

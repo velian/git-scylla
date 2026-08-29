@@ -4,15 +4,18 @@ import { engine } from "./engine/client";
 import type { Config } from "./bindings";
 import type { Scan } from "./useScan";
 
-const EMPTY: Config = { roots: [], editor: null, terminal: null, custom: [] };
+const EMPTY: Config = {
+  roots: [],
+  editor: null,
+  terminal: null,
+  fetch_interval_secs: null,
+  custom: [],
+};
 
 export type Roots = {
   paths: string[];
-  /** The whole persisted configuration, for the custom-command menu and settings editor. */
   config: Config;
-  /** Replace it, after a command that returns the configuration as it now stands. */
   adopt: (config: Config) => void;
-  /** Pick a directory and add it. A dismissed picker changes nothing. */
   add: () => Promise<void>;
   remove: (path: string) => Promise<void>;
 };

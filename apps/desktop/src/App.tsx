@@ -23,7 +23,6 @@ import type {
   Selection,
 } from "./bindings";
 
-/** The shell: roots on the left, whatever the engine knows on the right. */
 export default function App() {
   const [failure, setFailure] = useState<string | null>(null);
   const report = useCallback((e: unknown) => setFailure(asBridgeError(e).message), []);
@@ -32,22 +31,16 @@ export default function App() {
   const { repos, scanning, progress, errors, lagged } = scan;
   const roots = useRoots(scan, report);
 
-  // Keyed by RepoId, so a row refresh that replaces every row leaves the selection intact.
   const [selected, setSelected] = useState<Set<RepoId>>(new Set());
   const [filter, setFilter] = useState("");
-  // The filter text as last committed for evaluation, debounced separately from typing.
   const [query, setQuery] = useState("");
   const [matching, setMatching] = useState<Set<RepoId> | null>(null);
   const [filterError, setFilterError] = useState<string | null>(null);
   const [sort, setSort] = useState<Sort>({ key: "badge", dir: "asc" });
   const filterBox = useRef<HTMLInputElement>(null);
-  // Plan and view together, so the confirm button hands back the exact plan shown.
   const [sheet, setSheet] = useState<Sheet | null>(null);
   const [planning, setPlanning] = useState(false);
-  // The batch the open sheet would undo, if it is an undo. Routes confirm to
-  // `startUndo` instead of `startBatch`.
   const [undoing, setUndoing] = useState<BatchId | null>(null);
-  // Everything that has run this session. Folded from events; never persisted.
   const [batches, setBatches] = useState<jobs.Drawer>(jobs.EMPTY);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -61,9 +54,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    // `live` closes the window between unmount and the `listen` promise
-    // resolving; without it, StrictMode's development remount leaves two
-    // listeners briefly, and job states/log lines would apply twice.
     let live = true;
     const pending = engine.onEvents((events) => {
       if (!live) return;
@@ -76,7 +66,6 @@ export default function App() {
     };
   }, [scan.apply]);
 
-  // Debounce the text only; clearing the box is not typing, so un-filtering is immediate.
   useEffect(() => {
     if (filter.trim() === "") {
       setQuery("");
@@ -86,14 +75,12 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [filter]);
 
-  // The expression is evaluated by the engine; there is no grammar on this side.
   useEffect(() => {
     if (query.trim() === "") {
       setMatching(null);
       setFilterError(null);
       return;
     }
-    // Two queries can be in flight across a `repos` change; only the newest may write.
     let live = true;
     engine
       .selectRepos(query)
@@ -114,7 +101,6 @@ export default function App() {
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      // Nothing here applies while the sheet is up; Escape closes the sheet itself.
       if (sheetRef.current) return;
       if ((e.metaKey || e.ctrlKey) && e.key === "a") {
         const target = e.target as HTMLElement | null;
@@ -144,15 +130,12 @@ export default function App() {
     engine.setHasSelection(hasSelection).catch(() => {});
   }, [hasSelection]);
 
-  /** Plans an action. Never executes: that takes the sheet. */
   async function propose(action: Action, over?: RepoId[]) {
     setFailure(null);
     setPlanning(true);
     const selection: Selection = { type: "Ids", value: over ?? [...selected] };
     try {
       const proposed = await engine.plan(action, selection);
-      // Suppress the acknowledgement only for a definition already agreed to;
-      // a force-with-lease is never waved through.
       if (
         acknowledged(action) &&
         proposed.view.confirm_guard?.type === "Acknowledge"
@@ -177,8 +160,6 @@ export default function App() {
     try {
       const batch =
         undoes === null ? await engine.startBatch(plan) : await engine.startUndo(undoes, plan);
-      // The drawer has almost certainly already met this batch through its
-      // job events, which start before `start_batch` returns.
       setBatches((prev) => jobs.name(prev, batch, view.confirm_label ?? view.headline, plan.action, Date.now()));
       setDrawerOpen(true);
     } catch (e) {
@@ -186,13 +167,11 @@ export default function App() {
     }
   }
 
-  /** Retries through the sheet, since preconditions may say something different now. */
   function retry(batch: BatchView, repo: RepoId) {
     if (batch.action === null) return;
     void propose(batch.action, [repo]);
   }
 
-  /** Undo proposes through the same sheet as any other action; it never resets directly. */
   async function undoBatch(batch: BatchView) {
     setFailure(null);
     setPlanning(true);
@@ -225,7 +204,6 @@ export default function App() {
     [lagged, report],
   );
 
-  /** Re-probes without a plan sheet, like `fetch_now`: nothing here changes anything. */
   async function refreshSelected() {
     setFailure(null);
     try {
@@ -275,7 +253,6 @@ export default function App() {
     }
   }
 
-  /** A custom command carries its plan's acknowledgement guard unless already acknowledged. */
   function acknowledged(action: Action): boolean {
     if (action.type !== "Custom") return false;
     const argv = JSON.stringify(action.value.args);
@@ -384,6 +361,7 @@ export default function App() {
           custom={roots.config.custom}
           editor={roots.config.editor}
           terminal={roots.config.terminal}
+          fetchIntervalSecs={roots.config.fetch_interval_secs}
           onClose={() => setSettingsOpen(false)}
           onSave={(command: CustomCommand) =>
             void engine.putCustom(command).then(roots.adopt).catch(report)
@@ -395,13 +373,15 @@ export default function App() {
           onSetTerminal={(terminal) =>
             void engine.setTerminal(terminal).then(roots.adopt).catch(report)
           }
+          onSetFetchInterval={(secs) =>
+            void engine.setFetchInterval(secs).then(roots.adopt).catch(report)
+          }
         />
       )}
     </div>
   );
 }
 
-/** Scan progress in the title bar. Rows stream into the grid throughout; nothing blocks. */
 function ScanProgress({ progress }: { progress: Progress | null }) {
   const { found, probed } = progress ?? { found: 0, probed: 0 };
   return (

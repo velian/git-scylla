@@ -29,7 +29,6 @@ pub async fn get_snapshot(app: State<'_, App>) -> Result<Vec<RepoRow>> {
     Ok(app.engine.snapshot().await?.into_iter().map(RepoRow::from).collect())
 }
 
-/// The repositories matching a selection expression.
 #[tauri::command]
 pub async fn select_repos(app: State<'_, App>, expr: String) -> Result<Vec<RepoId>> {
     let selection = Selection::parse(&expr, None)
@@ -42,11 +41,9 @@ pub async fn refresh_repo(app: State<'_, App>, id: RepoId) -> Result<()> {
     Ok(app.engine.refresh_repo(id).await?)
 }
 
-/// What a batch would do, plus the strings that describe it.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct PlanSheet {
-    /// Opaque to the frontend; goes back to [`start_batch`] unmodified.
     pub plan: Plan,
     pub view: PlanView,
 }
@@ -62,8 +59,6 @@ pub async fn start_batch(app: State<'_, App>, plan: Plan) -> Result<BatchId> {
     Ok(app.engine.start_batch(plan, JobOrigin::User).await?)
 }
 
-/// What undoing a finished batch would do. Returns the same `PlanSheet` shape
-/// as `plan`; undo goes through the same confirmation.
 #[tauri::command]
 pub async fn plan_undo(app: State<'_, App>, id: BatchId) -> Result<PlanSheet> {
     let plan = app.engine.plan_undo(id).await?;
@@ -85,8 +80,6 @@ pub async fn job_log(app: State<'_, App>, id: JobId) -> Result<Vec<LogLine>> {
     Ok(app.engine.job_log(id).await?)
 }
 
-/// The native folder picker. `Ok(None)` when the user dismisses it — not an
-/// error.
 #[tauri::command]
 pub async fn pick_root_dir<R: tauri::Runtime>(window: tauri::Window<R>) -> Result<Option<PathBuf>> {
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -99,16 +92,11 @@ pub async fn pick_root_dir<R: tauri::Runtime>(window: tauri::Window<R>) -> Resul
     Ok(picked.and_then(|p| p.into_path().ok()))
 }
 
-// ---- roots -------------------------------------------------------------
-
-/// The persisted configuration.
 #[tauri::command]
 pub fn get_config(app: State<'_, App>) -> Result<Config> {
     Ok(app.config().clone())
 }
 
-/// Take the lock, apply `change`, save if it reports a change, return the
-/// resulting configuration.
 fn edit(app: &App, change: impl FnOnce(&mut Config) -> bool) -> Result<Config> {
     let mut config = app.config();
     if change(&mut config) {
@@ -129,7 +117,6 @@ pub fn remove_root(app: State<'_, App>, path: PathBuf) -> Result<Config> {
     edit(&app, |c| c.remove_root(&path))
 }
 
-/// Open the pane of System Settings that grants Full Disk Access.
 #[tauri::command]
 pub fn open_full_disk_access_settings<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<()> {
     const PANE: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
@@ -138,9 +125,6 @@ pub fn open_full_disk_access_settings<R: tauri::Runtime>(app: tauri::AppHandle<R
     })
 }
 
-// ---- handoffs and per-row actions --------------------------------------
-
-/// Open one repository in another application.
 #[tauri::command]
 pub fn hand_off<R: tauri::Runtime>(
     handle: tauri::AppHandle<R>,
@@ -155,15 +139,12 @@ pub fn hand_off<R: tauri::Runtime>(
     handoff::hand_off(&handle, what, &path, editor.as_deref(), terminal.as_deref())
 }
 
-/// What `Handoff::Terminal` would use right now. Lets the settings dialog
-/// show the resolution before it happens.
 #[tauri::command]
 pub fn resolved_terminal(app: State<'_, App>) -> String {
     let configured = app.config().terminal.clone();
     handoff::terminal_app(configured.as_deref())
 }
 
-/// The template substitution set.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Placeholder {
@@ -179,7 +160,6 @@ pub fn template_placeholders() -> Vec<Placeholder> {
         .collect()
 }
 
-/// Save or replace a custom command.
 #[tauri::command]
 pub fn put_custom(app: State<'_, App>, command: CustomCommand) -> Result<Config> {
     edit(&app, |c| {
@@ -193,7 +173,6 @@ pub fn remove_custom(app: State<'_, App>, name: String) -> Result<Config> {
     edit(&app, |c| c.remove_custom(&name))
 }
 
-/// Record that the user has read what a custom command does not get.
 #[tauri::command]
 pub fn acknowledge_custom(app: State<'_, App>, name: String) -> Result<Config> {
     edit(&app, |c| match c.custom.iter_mut().find(|c| c.name == name) {
@@ -213,7 +192,6 @@ pub fn set_editor(app: State<'_, App>, editor: Option<String>) -> Result<Config>
     })
 }
 
-/// `None` means "resolve it" — a working state, unlike a cleared editor.
 #[tauri::command]
 pub fn set_terminal(app: State<'_, App>, terminal: Option<String>) -> Result<Config> {
     edit(&app, |c| {
@@ -222,8 +200,19 @@ pub fn set_terminal(app: State<'_, App>, terminal: Option<String>) -> Result<Con
     })
 }
 
-/// Fetch one repository, now. Skips the plan sheet — the one action allowed
-/// to, since it cannot touch a worktree or local history.
+#[tauri::command]
+pub async fn set_fetch_interval(app: State<'_, App>, secs: Option<u64>) -> Result<Config> {
+    let config = edit(&app, |c| {
+        c.fetch_interval_secs = secs;
+        true
+    })?;
+    let interval = secs
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(git_scylla_engine::FetchPolicy::default().interval);
+    app.engine.set_fetch_interval(interval).await?;
+    Ok(config)
+}
+
 #[tauri::command]
 pub async fn fetch_now(app: State<'_, App>, id: RepoId) -> Result<BatchId> {
     let action = Action::Fetch { prune: true, tags: false };
@@ -231,8 +220,6 @@ pub async fn fetch_now(app: State<'_, App>, id: RepoId) -> Result<BatchId> {
     Ok(app.engine.start_batch(plan, JobOrigin::User).await?)
 }
 
-/// Tell the menu bar whether anything is selected. Called on the
-/// empty↔non-empty transition, not on every click.
 #[tauri::command]
 pub fn set_has_selection<R: tauri::Runtime>(app: tauri::AppHandle<R>, has: bool) {
     crate::menu::set_has_selection(&app, has);

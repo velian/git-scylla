@@ -1,4 +1,4 @@
-//! The Tauri shell. See `docs/README.md`.
+//! The Tauri shell.
 
 pub mod commands;
 pub mod config;
@@ -14,8 +14,6 @@ pub use error::{BridgeError, ErrorKind};
 pub use events::CHANNEL as EVENT_CHANNEL;
 pub use menu::CHANNEL as MENU_CHANNEL;
 
-/// The command surface, in one place. Used by both `run` and the test that
-/// drives it.
 #[macro_export]
 macro_rules! command_handler {
     () => {
@@ -44,6 +42,7 @@ macro_rules! command_handler {
             $crate::commands::put_custom,
             $crate::commands::remove_custom,
             $crate::commands::acknowledge_custom,
+            $crate::commands::set_fetch_interval,
             $crate::commands::fetch_now,
             $crate::commands::set_has_selection,
         ]
@@ -60,15 +59,24 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             use tauri::Manager;
+            let config = config::load();
+            let fetch = git_scylla_engine::FetchPolicy {
+                interval: config
+                    .fetch_interval_secs
+                    .map(std::time::Duration::from_secs)
+                    .unwrap_or(git_scylla_engine::FetchPolicy::default().interval),
+                ..git_scylla_engine::FetchPolicy::default()
+            };
             let engine = tauri::async_runtime::block_on(async {
                 Engine::start(EngineConfig {
                     cache: git_scylla_engine::CacheMode::ReadWrite,
+                    fetch,
                     ..EngineConfig::default()
                 })
             });
             events::forward(app.handle().clone(), engine.handle());
             menu::install(app.handle())?;
-            let state = App::new(engine, config::load());
+            let state = App::new(engine, config);
             let (handle, watcher) = (state.engine.clone(), std::sync::Arc::clone(&state.watcher));
             app.manage(state);
             watch::follow_scans(handle, watcher);

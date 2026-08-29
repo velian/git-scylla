@@ -41,12 +41,6 @@ fn repos(dir: &Path, n: usize) -> PathBuf {
     root.canonicalize().unwrap()
 }
 
-/// Sole ownership of `GIT_SCYLLA_STATE_DIR` for the duration of one test —
-/// the variable is process-wide and tests run on threads.
-///
-/// Drop order is load-bearing: the variable is cleared first, then the
-/// directory is removed, then the lock is released. Any other order leaves a
-/// window in which the next test sees a path that is no longer there.
 struct StateDir {
     _dir: tempfile::TempDir,
     _lock: std::sync::MutexGuard<'static, ()>,
@@ -75,8 +69,6 @@ fn app() -> WebviewWindow<tauri::test::MockRuntime> {
 fn app_with(
     config: git_scylla_desktop_lib::config::Config,
 ) -> WebviewWindow<tauri::test::MockRuntime> {
-    // The real context, not `mock_context`: the mock has no resolved ACL and
-    // refuses every command with "Plugin not found".
     let app = mock_builder()
         .invoke_handler(command_handler!())
         .build(tauri::generate_context!())
@@ -86,7 +78,6 @@ fn app_with(
     tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap()
 }
 
-/// Poll `f` until it returns `Some`, or give up after 30s.
 fn eventually<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while std::time::Instant::now() < deadline {
@@ -98,8 +89,6 @@ fn eventually<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
     panic!("timed out waiting for {what}");
 }
 
-/// Invoke a command and get the raw JSON back, so serialization is part of
-/// what is tested.
 fn call(
     window: &WebviewWindow<tauri::test::MockRuntime>,
     cmd: &str,
@@ -220,8 +209,6 @@ fn a_batch_runs_through_the_bridge_and_its_transcript_comes_back() {
         call(&window, "start_batch", json!({ "plan": sheet["plan"] })).expect("start_batch");
     assert!(batch.is_u64(), "BatchId is transparent on the wire: {batch}");
 
-    // Both ids are tried: the engine allocates skipped jobs first, so the one
-    // that ran is not necessarily id 1.
     let log = eventually("the job transcript", || {
         for id in 1..=2 {
             let log = call(&window, "job_log", json!({ "id": id })).expect("job_log");
@@ -241,15 +228,10 @@ fn a_batch_runs_through_the_bridge_and_its_transcript_comes_back() {
 
 #[test]
 fn a_failure_crosses_as_kind_and_message_not_a_debug_string() {
-    // Easiest to satisfy by accident and hardest to notice breaking: a
-    // `Debug`-formatted Rust error cannot be branched on without parsing prose,
-    // and it shows the user type names.
     let tmp = tempfile::tempdir().unwrap();
     repos(tmp.path(), 1);
     let window = app();
 
-    // A malformed filter cannot even be deserialized into a Selection, so this
-    // fails at the boundary rather than inside the engine.
     let err = call(
         &window,
         "plan",
@@ -332,11 +314,8 @@ fn adding_a_root_inside_an_existing_one_returns_the_unchanged_set() {
 
 #[test]
 fn rows_carry_the_derived_badge_so_the_frontend_never_computes_one() {
-    // The grid needs the badge for display and for its default sort; deriving
-    // it in TypeScript would put a piece of the domain in the frontend.
     let tmp = tempfile::tempdir().unwrap();
     let root = repos(tmp.path(), 2);
-    // One dirty, so the two rows do not share a badge.
     std::fs::write(root.join("r0/scratch.txt"), "x\n").unwrap();
     let window = app();
     call(&window, "start_scan", json!({ "roots": [root], "nested": false })).unwrap();
@@ -349,8 +328,6 @@ fn rows_carry_the_derived_badge_so_the_frontend_never_computes_one() {
     for row in rows.as_array().unwrap() {
         assert!(row["badge"].is_string(), "no badge on the row: {row}");
         assert!(row["badge_rank"].is_u64(), "no sort rank on the row: {row}");
-        // Flattened: a row is a repository with two extra columns, not a
-        // repository wrapped in something.
         assert!(row["path"].is_string(), "the snapshot should be flattened in: {row}");
         assert!(row.get("snapshot").is_none(), "flatten failed: {row}");
     }
@@ -365,7 +342,6 @@ fn rows_carry_the_derived_badge_so_the_frontend_never_computes_one() {
     };
     assert_eq!(by_name("r0")["badge"], "Dirty");
     assert_eq!(by_name("r1")["badge"], "Clean");
-    // Worse sorts first, which is what the default ordering relies on.
     assert!(
         by_name("r0")["badge_rank"].as_u64() < by_name("r1")["badge_rank"].as_u64(),
         "dirty should outrank clean"
@@ -448,8 +424,6 @@ fn the_terminal_is_configurable_and_says_what_it_would_use() {
     assert_eq!(git_scylla_desktop_lib::config::load().terminal.as_deref(), Some("iTerm"));
     assert_eq!(call(&window, "resolved_terminal", json!({})).unwrap(), "iTerm");
 
-    // Clearing goes back to the resolution, unlike the editor, where clearing
-    // leaves the handoff unusable.
     let config = call(&window, "set_terminal", json!({ "terminal": null })).expect("clear");
     assert_eq!(config["terminal"], serde_json::Value::Null);
     assert_eq!(call(&window, "resolved_terminal", json!({})).unwrap(), before);
@@ -458,9 +432,24 @@ fn the_terminal_is_configurable_and_says_what_it_would_use() {
     assert_eq!(config["terminal"], serde_json::Value::Null);
 }
 
-/// The CLI and the GUI must produce identical plans for the same action and
-/// selection — asserted against the shipped `git-scylla` binary, not against
-/// `engine::plan` twice.
+#[test]
+fn the_fetch_interval_is_configurable_and_persists() {
+    let _state = StateDir::new();
+    let window = app();
+
+    let config = call(&window, "get_config", json!({})).expect("get_config");
+    assert_eq!(config["fetch_interval_secs"], serde_json::Value::Null, "default is unset");
+
+    let config = call(&window, "set_fetch_interval", json!({ "secs": 300 })).expect("set");
+    assert_eq!(config["fetch_interval_secs"], 300);
+    assert_eq!(git_scylla_desktop_lib::config::load().fetch_interval_secs, Some(300));
+
+    let config =
+        call(&window, "set_fetch_interval", json!({ "secs": Value::Null })).expect("clear");
+    assert_eq!(config["fetch_interval_secs"], serde_json::Value::Null);
+    assert_eq!(git_scylla_desktop_lib::config::load().fetch_interval_secs, None);
+}
+
 #[test]
 fn the_cli_and_the_gui_plan_the_same_thing() {
     let tmp = tempfile::tempdir().unwrap();
@@ -494,8 +483,6 @@ fn the_cli_and_the_gui_plan_the_same_thing() {
     assert!(view.skips.len() >= 2, "{from_cli}");
 }
 
-/// One repository of each interesting shape, so the compared plan is not just a
-/// header. Two behind a shared upstream, one dirty, one with no remote at all.
 fn diverse_repos(dir: &Path) -> PathBuf {
     let upstream = dir.join("upstream.git");
     git(dir, &["init", "--bare", "-b", "main", upstream.to_str().unwrap()]);
@@ -534,8 +521,6 @@ fn diverse_repos(dir: &Path) -> PathBuf {
     root.canonicalize().unwrap()
 }
 
-/// The `git-scylla` binary this workspace just built. The test binary's own
-/// directory is `target/<profile>/deps`; the sibling verbs live one level up.
 fn cli_binary() -> PathBuf {
     let mut dir = std::env::current_exe().expect("current_exe");
     dir.pop(); // deps/

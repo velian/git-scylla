@@ -49,6 +49,7 @@ pub enum Cmd {
     RefreshRepo { id: RepoId },
     Invalidate { what: git_scylla_watch::Invalidation },
     SetWatched { covered: bool },
+    SetFetchInterval { interval: Duration },
     Snapshot { reply: oneshot::Sender<Vec<RepoSnapshot>> },
     Select { sel: Selection, reply: oneshot::Sender<Vec<RepoId>> },
     JobLog { id: JobId, reply: oneshot::Sender<Vec<LogLine>> },
@@ -189,6 +190,10 @@ impl EngineHandle {
 
     pub async fn set_watched(&self, covered: bool) -> Result<(), Gone> {
         self.send(Cmd::SetWatched { covered }).await
+    }
+
+    pub async fn set_fetch_interval(&self, interval: Duration) -> Result<(), Gone> {
+        self.send(Cmd::SetFetchInterval { interval }).await
     }
 
     pub async fn invalidate(&self, what: git_scylla_watch::Invalidation) -> Result<(), Gone> {
@@ -513,6 +518,29 @@ impl Actor {
                     .map(|s| {
                         s.watched = covered;
                         s.clone()
+                    })
+                    .collect();
+                if !moved.is_empty() {
+                    self.emit(Event::ReposUpserted(moved));
+                }
+            }
+
+            Cmd::SetFetchInterval { interval } => {
+                self.config.fetch.interval = interval;
+                let now = SystemTime::now();
+                let fetch = self.config.fetch.clone();
+                let moved: Vec<RepoSnapshot> = self
+                    .snapshots
+                    .values_mut()
+                    .filter_map(|s| match s.fetch.schedule {
+                        FetchSchedule::Due(at) => {
+                            let bound = fetch.next_due(&s.id, now);
+                            (at > bound).then(|| {
+                                s.fetch.schedule = FetchSchedule::Due(bound);
+                                s.clone()
+                            })
+                        }
+                        _ => None,
                     })
                     .collect();
                 if !moved.is_empty() {
