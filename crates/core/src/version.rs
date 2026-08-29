@@ -1,11 +1,8 @@
 //! Deriving the next tag in a pre-release series.
-//!
-//! Ordering is by tag name, never by commit date.
 
 use serde::{Deserialize, Serialize};
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-/// Which component the next series starts from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Bump {
     Major,
@@ -23,7 +20,6 @@ impl std::fmt::Display for Bump {
     }
 }
 
-/// `major.minor.patch`, ordered as numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Version {
     pub major: u64,
@@ -38,7 +34,6 @@ impl std::fmt::Display for Version {
 }
 
 impl Version {
-    /// Where the next series starts, from this release.
     fn bumped(self, bump: Bump) -> Self {
         match bump {
             Bump::Major => Version { major: self.major + 1, minor: 0, patch: 0 },
@@ -48,20 +43,15 @@ impl Version {
     }
 }
 
-/// What a tag name turned out to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Pre {
-    /// No pre-release part: an actual release, and a candidate for "newest".
     None,
-    /// `-<channel>.<n>` — a numbered series.
     Series { channel: String, n: u64 },
-    /// A pre-release this cannot count: `-beta`, `-rc1`, `-dev.x`.
     Other,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Parsed {
-    /// Whether the name carried a leading `v`.
     v_prefix: bool,
     version: Version,
     pre: Pre,
@@ -95,15 +85,6 @@ fn parse(tag: &str) -> Option<Parsed> {
     Some(Parsed { v_prefix, version, pre })
 }
 
-/// The next tag in `channel`'s series, given every tag this repository has.
-///
-/// The rule, in order:
-///
-/// 1. The newest **release** — a tag with no pre-release part — decides where
-///    the next series starts, via `bump`.
-/// 2. The newest existing tag *in this channel* decides where a series
-///    already under way is. Whichever of the two is higher wins.
-/// 3. The number is one past the highest already used *at that version*, or 1.
 pub fn next_dev_tag(tags: &[String], channel: &str, bump: Bump) -> String {
     let parsed: Vec<Parsed> = tags.iter().filter_map(|t| parse(t)).collect();
 
@@ -115,9 +96,9 @@ pub fn next_dev_tag(tags: &[String], channel: &str, bump: Bump) -> String {
 
     let from_release = newest_release.map(|p| p.version.bumped(bump));
     let from_series = newest_in_series.map(|p| p.version);
-    let target = from_release.max(from_series).unwrap_or_else(|| {
-        Version { major: 0, minor: 0, patch: 0 }.bumped(bump)
-    });
+    let target = from_release
+        .max(from_series)
+        .unwrap_or_else(|| Version { major: 0, minor: 0, patch: 0 }.bumped(bump));
 
     let n = parsed
         .iter()

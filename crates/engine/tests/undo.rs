@@ -1,9 +1,4 @@
 //! Undo.
-//!
-//! `reset --hard` destroying real work is the risk this whole task carries, so
-//! most of what is asserted here is the *refusals*. Each guard gets its own
-//! case, because a guard that is only covered incidentally is a guard that can
-//! be deleted without anything going red.
 
 use git_scylla_core::{Action, JobOrigin, JobState, PullMode, ResetMode, SkipReason};
 use git_scylla_engine::{Config, Engine, EngineHandle, Event, Plan, Policy, Selection};
@@ -27,7 +22,6 @@ fn git(cwd: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-/// `n` clones, each one commit behind its origin, so a pull has work.
 fn world(dir: &Path, n: usize) -> PathBuf {
     std::fs::create_dir_all(dir).unwrap();
     let dir = dir.canonicalize().unwrap();
@@ -71,7 +65,6 @@ fn config() -> Config {
     }
 }
 
-/// Run a plan and wait for it to finish.
 async fn run(h: &EngineHandle, plan: Plan) -> git_scylla_core::BatchId {
     let mut events = h.subscribe();
     let batch = h.start_batch(plan, JobOrigin::User).await.unwrap();
@@ -79,14 +72,12 @@ async fn run(h: &EngineHandle, plan: Plan) -> git_scylla_core::BatchId {
     batch
 }
 
-/// Pull everything, and return the batch.
 async fn pull_all(h: &EngineHandle) -> git_scylla_core::BatchId {
     let plan = h.plan(Action::Pull { mode: PullMode::FfOnly }, Selection::All).await.unwrap();
     assert!(!plan.eligible.is_empty(), "the fixture gave the pull nothing to do");
     run(h, plan).await
 }
 
-/// Let the post-job re-probes land, so the undo plan reads current facts.
 async fn settle(h: &EngineHandle) {
     for _ in 0..30 {
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -99,6 +90,46 @@ fn reasons(plan: &Plan) -> Vec<String> {
 }
 
 // ---- the repair --------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn undoing_a_checkout_is_refused_when_the_branch_it_would_return_to_is_gone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repos = world(tmp.path(), 1);
+    let repo = repos.join("r00");
+    git(&repo, &["checkout", "-b", "feature"]);
+
+    let engine = Engine::start(config());
+    let h = engine.handle();
+    h.scan_to_completion(vec![repos.clone()], false).await.unwrap();
+
+    let plan = h
+        .plan(Action::Checkout { rev: "main".into(), create: false }, Selection::All)
+        .await
+        .unwrap();
+    assert_eq!(plan.eligible.len(), 1, "{:?}", reasons(&plan));
+    let batch = run(&h, plan).await;
+    settle(&h).await;
+    assert_eq!(git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]), "main");
+
+    let undoable = h.plan_undo(batch).await.unwrap();
+    assert_eq!(undoable.eligible.len(), 1, "{:?}", reasons(&undoable));
+    assert!(
+        matches!(&undoable.eligible[0].1, Action::Checkout { rev, create: false } if rev == "feature"),
+        "{:?}",
+        undoable.eligible[0].1
+    );
+
+    git(&repo, &["branch", "-D", "feature"]);
+    settle(&h).await;
+    let gone = h.plan_undo(batch).await.unwrap();
+    assert!(gone.eligible.is_empty(), "{:?}", gone.eligible);
+    assert_eq!(
+        gone.skipped.iter().map(|(_, w)| w.clone()).collect::<Vec<_>>(),
+        vec![SkipReason::RefNotFound("feature".into())]
+    );
+
+    engine.shutdown().await;
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pull_batch_can_be_undone_and_every_head_returns() {
@@ -118,7 +149,6 @@ async fn a_pull_batch_can_be_undone_and_every_head_returns() {
 
     let plan = h.plan_undo(batch).await.unwrap();
     assert_eq!(plan.eligible.len(), 3, "{:?}", reasons(&plan));
-    // Each repository resets to *its own* commit.
     for (_, action) in &plan.eligible {
         assert!(matches!(action, Action::Reset { mode: ResetMode::Hard, .. }), "{action:?}");
     }
@@ -135,9 +165,6 @@ async fn a_pull_batch_can_be_undone_and_every_head_returns() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn undo_is_an_ordinary_plan_with_an_ordinary_confirmation() {
-    // Not a special case, and it must not bypass the sheet. The confirmation
-    // copy has to say what `--hard` does, in the headline, because that is the
-    // line the user reads before pressing anything.
     let tmp = tempfile::tempdir().unwrap();
     let repos = world(tmp.path(), 2);
     let engine = Engine::start(config());
@@ -155,7 +182,6 @@ async fn undo_is_an_ordinary_plan_with_an_ordinary_confirmation() {
         "the headline does not say what --hard does: {}",
         view.headline
     );
-    // ...and the repositories it would touch are named, not just counted.
     assert_eq!(view.eligible.as_ref().unwrap().repos.len(), 2);
     engine.shutdown().await;
 }
@@ -172,8 +198,6 @@ async fn a_repository_that_went_dirty_after_the_batch_is_refused() {
     let batch = pull_all(&h).await;
     settle(&h).await;
 
-    // The user got back to work. `--hard` here would throw away something that
-    // has nothing to do with the batch.
     std::fs::write(snaps[0].path.join("mine.txt"), "work\n").unwrap();
     h.refresh_repo(snaps[0].id.clone()).await.unwrap();
     settle(&h).await;
@@ -192,9 +216,6 @@ async fn a_repository_that_went_dirty_after_the_batch_is_refused() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_repository_committed_on_top_of_is_refused() {
-    // The guard `head_before` alone cannot express: a repository that has moved
-    // has either been moved by this job, or moved by this job *and then*
-    // committed on. Undoing the second discards work nobody asked to lose.
     let tmp = tempfile::tempdir().unwrap();
     let repos = world(tmp.path(), 2);
     let engine = Engine::start(config());
@@ -230,8 +251,6 @@ async fn a_repository_left_mid_operation_is_refused() {
     let batch = pull_all(&h).await;
     settle(&h).await;
 
-    // A half-finished merge. Resetting out from under one leaves a repository
-    // in a state the user cannot reason about.
     let repo = snaps[0].path.clone();
     std::fs::write(repo.join(".git/MERGE_HEAD"), git(&repo, &["rev-parse", "HEAD"])).unwrap();
     h.refresh_repo(snaps[0].id.clone()).await.unwrap();
@@ -250,8 +269,6 @@ async fn a_repository_left_mid_operation_is_refused() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_fetch_batch_offers_nothing_to_undo() {
-    // Being honest about what cannot be undone matters more than maximising
-    // coverage: a fetch only advanced remote-tracking refs.
     let tmp = tempfile::tempdir().unwrap();
     let repos = world(tmp.path(), 2);
     let engine = Engine::start(config());
@@ -269,17 +286,12 @@ async fn a_fetch_batch_offers_nothing_to_undo() {
         "{:?}",
         reasons(&plan)
     );
-    // An empty plan offers no control at all, rather than a disabled one whose
-    // meaning the user has to work out.
     assert!(plan.view().confirm_label.is_none());
     engine.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_undo_is_never_itself_undone() {
-    // One level, explicit, recent. A stack would need a history the tool
-    // deliberately does not keep, and a second undo of the same work is a
-    // `reset --hard` whose target nobody chose.
     let tmp = tempfile::tempdir().unwrap();
     let repos = world(tmp.path(), 2);
     let engine = Engine::start(config());
@@ -321,8 +333,6 @@ async fn a_job_that_failed_has_nothing_to_repair() {
     let h = engine.handle();
     let snaps = h.scan_to_completion(vec![repos.clone()], false).await.unwrap().snapshots;
 
-    // A checkout of a ref that does not exist: mutating, so `head_before` is
-    // recorded, but it changed nothing.
     let action = Action::Checkout { rev: "no-such-branch".into(), create: false };
     let plan = Plan {
         action: action.clone(),

@@ -13,11 +13,11 @@
 
 use git_scylla_core::{
     Action, FetchHealth, FetchSchedule, Head, PullMode, RepoId, RepoKind, RepoSnapshot, SkipReason,
+    SyncPlan,
 };
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime};
 
-/// Whether an action may run against one repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Eligibility {
     Eligible,
@@ -37,24 +37,12 @@ impl Eligibility {
     }
 }
 
-/// The thresholds the rules consult.
-///
-/// Separate from the rules themselves: a threshold is the kind of thing to
-/// revisit after real use rather than before it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Policy {
-    /// Beyond this age a snapshot is not trusted and every action skips with
-    /// [`SkipReason::SnapshotStale`]. Covers repositories the watcher does
-    /// not reach, and a UI left open overnight.
     #[serde(with = "git_scylla_core::serde_duration")]
     pub max_snapshot_age: Duration,
-    /// How recently a fetch must have succeeded for `--force-with-lease` to
-    /// mean anything. A lease against a stale remote-tracking ref is not a
-    /// lease — it is a force push with extra steps.
     #[serde(with = "git_scylla_core::serde_duration")]
     pub max_lease_age: Duration,
-    /// May a bare repository be fetched? Bare repositories are often local
-    /// mirrors the user does not think of as part of the working set.
     pub fetch_bare: bool,
 }
 
@@ -68,20 +56,12 @@ impl Default for Policy {
     }
 }
 
-/// Is `action` safe to run against `snap`?
-///
-/// `now` is passed in rather than read from a clock, so the function stays
-/// pure and the staleness rule stays exhaustively testable.
 pub fn evaluate(
     action: &Action,
     snap: &RepoSnapshot,
     now: SystemTime,
     policy: &Policy,
 ) -> Eligibility {
-    // Acting on an untrusted snapshot is how a bulk tool corrupts a working
-    // set. Exempt `Fetch`: it only advances `refs/remotes/**`, and blocking
-    // it on age would stop automatic fetching on any repository nothing else
-    // re-probes.
     if !matches!(action, Action::Fetch { .. }) {
         if let Some(skip) = untrustworthy(snap, now, policy) {
             return Eligibility::Skip(skip);
@@ -106,18 +86,10 @@ pub fn evaluate(
     }
 }
 
-/// Is this snapshot too old, or the product of a probe that failed?
-///
-/// Mirrors [`RepoSnapshot::is_stale`], which the grid uses to mark a stale
-/// row — a row shown as current must not be one an action then refuses.
 fn untrustworthy(snap: &RepoSnapshot, now: SystemTime, policy: &Policy) -> Option<SkipReason> {
     snap.is_stale(now, policy.max_snapshot_age).then_some(SkipReason::SnapshotStale)
 }
 
-/// The blockers common to every action that touches a worktree.
-///
-/// Ordered by how much they explain: a mid-rebase repository is also
-/// detached, and "rebase in progress" is the fact the user needs.
 fn worktree_blockers(snap: &RepoSnapshot) -> Option<SkipReason> {
     if !snap.kind.has_worktree() {
         return Some(SkipReason::BareRepo);
@@ -128,7 +100,6 @@ fn worktree_blockers(snap: &RepoSnapshot) -> Option<SkipReason> {
     None
 }
 
-/// Requires a real branch to act on.
 fn branch_blockers(snap: &RepoSnapshot) -> Option<SkipReason> {
     match snap.head {
         Head::Branch(_) => None,
@@ -137,15 +108,7 @@ fn branch_blockers(snap: &RepoSnapshot) -> Option<SkipReason> {
     }
 }
 
-/// Fetch is the permissive one, on purpose: it only advances
-/// `refs/remotes/**`, so it is safe on a dirty worktree, a detached HEAD,
-/// mid-rebase, or an unborn branch. The only questions are whether there is
-/// somewhere to fetch from and whether bare repositories are included.
 fn fetch(snap: &RepoSnapshot, policy: &Policy) -> Eligibility {
-    // Narrower than the universal trust rule: a failed probe or a
-    // cache-restored row means we don't know this is a repository at all.
-    // Age alone does not disqualify — that is exactly when `behind` most
-    // needs refreshing.
     if !snap.is_trustworthy() || snap.from_cache {
         return Eligibility::Skip(SkipReason::SnapshotStale);
     }
@@ -166,8 +129,6 @@ fn pull(snap: &RepoSnapshot, mode: PullMode) -> Eligibility {
         return Eligibility::Skip(SkipReason::NoUpstream);
     };
     let Some(sync) = upstream.sync else {
-        // Configured but unresolvable, not `NoUpstream`: the configuration is
-        // right and the remote is wrong.
         return Eligibility::Skip(SkipReason::UpstreamGone);
     };
     if sync.behind == 0 {
@@ -177,14 +138,11 @@ fn pull(snap: &RepoSnapshot, mode: PullMode) -> Eligibility {
         return Eligibility::Skip(SkipReason::Diverged);
     }
     if !snap.is_clean() {
-        // Required by every mode, including rebase and merge: the default is
-        // no autostash, and the argv says `--no-autostash` explicitly.
         return Eligibility::Skip(SkipReason::DirtyWorktree);
     }
     Eligibility::Eligible
 }
 
-/// Worktree dirtiness is **irrelevant** to push; do not restrict on it.
 fn push(
     snap: &RepoSnapshot,
     set_upstream: Option<&str>,
@@ -203,8 +161,6 @@ fn push(
         _ => {}
     }
     match snap.upstream.as_ref().and_then(|u| u.sync) {
-        // No tracking ref yet; with a remote to set upstream to, there is by
-        // definition something to publish.
         None if set_upstream.is_some() => {}
         None => return Eligibility::Skip(SkipReason::UpstreamGone),
         Some(sync) => {
@@ -217,18 +173,11 @@ fn push(
         }
     }
     if force_with_lease && !lease_is_fresh(snap, now, policy) {
-        // Reported as stale rather than as a push problem, because
-        // refreshing is the fix.
         return Eligibility::Skip(SkipReason::SnapshotStale);
     }
     Eligibility::Eligible
 }
 
-/// Has anything fetched into this repository recently enough to lease
-/// against? Checks both `Upstream::last_fetch` (any fetch, including the
-/// user's own terminal) and `FetchHealth::last_success` (this tool's
-/// scheduler) — a repository quarantined for a day has an ancient lease
-/// however healthy it looks.
 fn lease_is_fresh(snap: &RepoSnapshot, now: SystemTime, policy: &Policy) -> bool {
     let newest = [snap.upstream.as_ref().and_then(|u| u.last_fetch), snap.fetch.last_success]
         .into_iter()
@@ -240,34 +189,24 @@ fn lease_is_fresh(snap: &RepoSnapshot, now: SystemTime, policy: &Policy) -> bool
     }
 }
 
-/// The clean-worktree requirement is not negotiable: bulk checkout is
-/// genuinely useful and genuinely dangerous on dirty trees.
 fn checkout(snap: &RepoSnapshot, create: bool) -> Eligibility {
     if let Some(skip) = worktree_blockers(snap) {
         return Eligibility::Skip(skip);
     }
-    // `git checkout -b` works on an unborn branch; checking out an existing
-    // ref does not, because there are none.
     if !create && matches!(snap.head, Head::Unborn(_)) {
         return Eligibility::Skip(SkipReason::UnbornBranch);
     }
     if !snap.is_clean() {
         return Eligibility::Skip(SkipReason::DirtyWorktree);
     }
-    // `SkipReason::RefNotFound` cannot be decided here: ref existence is not
-    // in `RepoSnapshot`, kept off the scan path so this stays fast for a
-    // hundred repositories. The planner resolves it from the filesystem.
     Eligibility::Eligible
 }
 
-/// Born or unborn are both fine — the first commit is still a commit.
 fn commit(snap: &RepoSnapshot, stage_all: bool) -> Eligibility {
     if let Some(skip) = worktree_blockers(snap) {
         return Eligibility::Skip(skip);
     }
     let staged = snap.work.staged > 0;
-    // `git add -A` picks up untracked files too, so untracked-only still
-    // counts as something to commit.
     let stageable = stage_all && (snap.work.modified > 0 || snap.work.untracked > 0);
     if !staged && !stageable {
         return Eligibility::Skip(SkipReason::UpToDate);
@@ -291,9 +230,6 @@ fn stash(snap: &RepoSnapshot, include_untracked: bool) -> Eligibility {
     Eligibility::Eligible
 }
 
-/// "Clean enough" means no conflicts: popping onto merely-modified files
-/// usually works and git says so clearly when it does not, but popping onto
-/// an unresolved conflict cannot.
 fn stash_pop(snap: &RepoSnapshot) -> Eligibility {
     if let Some(skip) = worktree_blockers(snap) {
         return Eligibility::Skip(skip);
@@ -307,9 +243,6 @@ fn stash_pop(snap: &RepoSnapshot) -> Eligibility {
     Eligibility::Eligible
 }
 
-/// Cutting a tag. Deliberately permissive about the worktree and about a
-/// detached `HEAD` — a tag only needs a commit to point at. The plan's
-/// warning covers a tag on `HEAD` not including what is still uncommitted.
 fn dev_tag(snap: &RepoSnapshot, push: bool) -> Eligibility {
     if let Some(skip) = worktree_blockers(snap) {
         return Eligibility::Skip(skip);
@@ -324,14 +257,6 @@ fn dev_tag(snap: &RepoSnapshot, push: bool) -> Eligibility {
     Eligibility::Eligible
 }
 
-/// Syncing the default branch. The preconditions here are the snapshot's
-/// half; which branch to visit is answered by the engine, not the snapshot.
-///
-/// Deliberately not requiring a clean worktree (the action stashes), and not
-/// judged on `ahead`/`behind` (those describe the branch the user is on, not
-/// the one being synced). It also cannot check that the default branch has
-/// an upstream, for the same reason — that failure surfaces as a job with
-/// git's own message.
 fn sync_default(snap: &RepoSnapshot) -> Eligibility {
     if let Some(skip) = worktree_blockers(snap).or_else(|| branch_blockers(snap)) {
         // A branch, not just a worktree: the action promises to put the user
@@ -343,10 +268,12 @@ fn sync_default(snap: &RepoSnapshot) -> Eligibility {
     }
     Eligibility::Eligible
 }
-
-/// Creating a branch does not touch the worktree, so `Checkout`'s clean
-/// requirement does not apply. Still needs a commit to point at — an unborn
-/// branch has none, and `git branch` on one fails.
+pub fn sync_default_resolved(snap: &RepoSnapshot, plan: &SyncPlan) -> Eligibility {
+    if plan.default == plan.back_to && !snap.is_clean() {
+        return Eligibility::Skip(SkipReason::DirtyWorktree);
+    }
+    Eligibility::Eligible
+}
 fn branch(snap: &RepoSnapshot) -> Eligibility {
     if let Some(skip) = worktree_blockers(snap) {
         return Eligibility::Skip(skip);
@@ -357,30 +284,19 @@ fn branch(snap: &RepoSnapshot) -> Eligibility {
     Eligibility::Eligible
 }
 
-/// The guards on undo, all mandatory: `reset --hard` destroying real work is
-/// the risk, so refusing loudly beats succeeding destructively. A fourth
-/// guard — that `HEAD` is still where the job left it — needs the job as
-/// well as the snapshot, and lives in [`crate::plan::undo`].
-///
-/// Staleness is covered by the universal rule in [`evaluate`], since `Reset`
-/// is not `Fetch`.
 fn reset(snap: &RepoSnapshot, to: &git_scylla_core::Oid) -> Eligibility {
     if let Some(skip) = worktree_blockers(snap) {
         return Eligibility::Skip(skip);
     }
-    // A dirty tree may hold work unrelated to the batch being undone.
     if !snap.is_clean() {
         return Eligibility::Skip(SkipReason::DirtyWorktree);
     }
-    // Already there. Undoing again would be a no-op that reads as a success.
     if snap.head_oid.as_ref() == Some(to) {
         return Eligibility::Skip(SkipReason::UpToDate);
     }
     Eligibility::Eligible
 }
 
-/// Only the universal rules apply: the engine cannot reason about an
-/// arbitrary command, including whether a bare repository is a valid target.
 fn custom(snap: &RepoSnapshot) -> Eligibility {
     if let Some(op) = snap.op {
         return Eligibility::Skip(SkipReason::OperationInProgress(op));
@@ -388,32 +304,14 @@ fn custom(snap: &RepoSnapshot) -> Eligibility {
     Eligibility::Eligible
 }
 
-// ---- automatic fetching -------------------------------------------------
-
-/// The thresholds automatic fetching consults.
-///
-/// No `per_host` field: that cap is `Limits::per_host`, enforced by the
-/// scheduler's semaphore, so the background and foreground paths cannot
-/// disagree about it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FetchPolicy {
-    /// Per repository. Fifteen minutes: often enough that `behind` is worth
-    /// believing, rare enough that a working set of a hundred is a few
-    /// subprocesses a minute.
     #[serde(with = "git_scylla_core::serde_duration")]
     pub interval: Duration,
-    /// How far either side of the interval a repository's slot may sit, as a
-    /// percentage. Keeps a large working set from fetching in the same
-    /// second.
     pub jitter_pct: u8,
-    /// Waits after consecutive failures. Indexed by failure count, saturating
-    /// at the last.
     #[serde(with = "backoff_serde")]
     pub backoff: [Duration; 4],
-    /// Consecutive failures before a repository is quarantined and never
-    /// retried automatically.
     pub quarantine_after: u32,
-    /// The off switch, for somebody on a tethered connection.
     pub enabled: bool,
 }
 
@@ -435,37 +333,19 @@ impl Default for FetchPolicy {
 }
 
 impl FetchPolicy {
-    /// The wait after `failures` consecutive failures.
     pub fn backoff_for(&self, failures: u32) -> Duration {
         self.backoff[(failures.saturating_sub(1) as usize).min(self.backoff.len() - 1)]
     }
-
-    /// When this repository should next be attempted after a success.
-    ///
-    /// Symmetric about the interval: the window is
-    /// `[interval - span, interval + span)`, so the mean stays the
-    /// configured interval rather than drifting up by half the jitter. The
-    /// jitter itself is deterministic per repository — see [`jitter`].
     pub fn next_due(&self, id: &RepoId, after: SystemTime) -> SystemTime {
         after
             + self.interval.saturating_sub(self.span())
             + jitter(id, self.interval, self.jitter_pct)
     }
 
-    /// How far either side of the interval a slot may sit.
     pub fn span(&self) -> Duration {
         self.interval.mul_f64(f64::from(self.jitter_pct.min(100)) / 100.0)
     }
 }
-
-/// This repository's offset within the fetch cycle, in `[0, 2 × span)`.
-///
-/// Derived from a hash of the id rather than a fresh random: the same
-/// repository keeps its slot across restarts instead of re-rolling into a new
-/// herd every launch, and the schedule stays reproducible for tests.
-///
-/// FNV-1a rather than `DefaultHasher`, whose output is not stable across Rust
-/// releases.
 pub fn jitter(id: &RepoId, interval: Duration, pct: u8) -> Duration {
     let span = interval.mul_f64(f64::from(pct.min(100)) / 100.0);
     let window = (span.as_millis() as u64).saturating_mul(2);
@@ -480,15 +360,6 @@ pub fn jitter(id: &RepoId, interval: Duration, pct: u8) -> Duration {
     Duration::from_millis(hash % window)
 }
 
-/// Which repositories are due a background fetch.
-///
-/// Pure: no I/O and no clock of its own, so backoff and quarantine are
-/// testable by advancing a number instead of waiting two hours.
-///
-/// The engine is free to ignore any entry. A repository this returns may be
-/// busy, mid-batch, or already queued by the time the engine looks, and a
-/// tick dropped for any of those reasons is **not a failure** and must not
-/// count toward backoff.
 pub fn due(
     now: SystemTime,
     snaps: &[RepoSnapshot],
@@ -508,7 +379,6 @@ pub fn due(
         .collect()
 }
 
-/// Has this repository's schedule come round?
 fn ready(now: SystemTime, schedule: &FetchSchedule) -> bool {
     match schedule {
         FetchSchedule::Due(at) | FetchSchedule::BackingOff { until: at, .. } => now >= *at,
@@ -518,11 +388,6 @@ fn ready(now: SystemTime, schedule: &FetchSchedule) -> bool {
     }
 }
 
-/// What one fetch attempt did to a repository's schedule.
-///
-/// Pure, and separate from the engine for the same reason [`due`] is:
-/// backoff and quarantine live here so they are assertable by advancing a
-/// clock.
 pub fn after_attempt(
     health: &FetchHealth,
     id: &RepoId,
@@ -556,15 +421,12 @@ pub fn after_attempt(
     }
 }
 
-/// How a fetch attempt ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Attempt<'a> {
     Ok,
-    /// With the first line of git's own stderr, kept verbatim.
     Failed(&'a str),
 }
 
-/// The user asked. Clears backoff and quarantine, whatever the outcome.
 pub fn manual_attempt(
     health: &FetchHealth,
     id: &RepoId,
@@ -572,8 +434,6 @@ pub fn manual_attempt(
     outcome: Attempt<'_>,
     fetch: &FetchPolicy,
 ) -> FetchHealth {
-    // Cleared *first*, so a failure that follows starts a fresh backoff
-    // rather than resuming the one the user was trying to escape.
     let cleared = FetchHealth {
         last_attempt: health.last_attempt,
         last_success: health.last_success,
@@ -582,7 +442,6 @@ pub fn manual_attempt(
     after_attempt(&cleared, id, now, outcome, fetch)
 }
 
-/// `[Duration; 4]` as four millisecond counts.
 mod backoff_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::time::Duration;
@@ -601,8 +460,6 @@ mod tests {
     use super::*;
     use git_scylla_core::{InProgress, ProbeOutcome};
 
-    /// Every `InProgress` value, so the tests below stay exhaustive when one
-    /// is added.
     const ALL_IN_PROGRESS: &[InProgress] = &[
         InProgress::Merge,
         InProgress::Rebase,
@@ -618,8 +475,6 @@ mod tests {
         T0 + Duration::from_secs(secs)
     }
 
-    /// A clean, tracked, in-sync repository. Every test below is a delta from
-    /// this, so the thing under test is the only thing that differs.
     fn snap() -> RepoSnapshot {
         let mut s = RepoSnapshot::stub("/r");
         s.upstream = Some(Upstream {
@@ -639,7 +494,6 @@ mod tests {
         s
     }
 
-    /// Evaluate at T0, so nothing is stale unless the test makes it so.
     fn ev(action: &Action, s: &RepoSnapshot) -> Eligibility {
         evaluate(action, s, T0, &Policy::default())
     }
@@ -668,8 +522,6 @@ mod tests {
         ]
     }
 
-    // ---- the universal rule -------------------------------------------
-
     #[test]
     fn an_untrusted_snapshot_blocks_every_action_including_fetch() {
         for outcome in [ProbeOutcome::Timeout, ProbeOutcome::Error("boom".into())] {
@@ -690,7 +542,6 @@ mod tests {
         let s = snap(); // probed at T0
         let policy = Policy { max_snapshot_age: Duration::from_secs(30), ..Default::default() };
         for action in all_actions().into_iter().filter(|a| !matches!(a, Action::Fetch { .. })) {
-            // The bound is inclusive: exactly at it, still trusted.
             assert_ne!(
                 evaluate(&action, &s, at(30), &policy).skip_reason(),
                 Some(&SkipReason::SnapshotStale),
@@ -712,7 +563,6 @@ mod tests {
 
     #[test]
     fn a_row_restored_from_the_cache_is_not_fetched_either() {
-        // Age is not disqualifying; not having been seen by this process is.
         let mut s = snap();
         s.from_cache = true;
         assert_eq!(skip(&FETCH, &s), Some(SkipReason::SnapshotStale));
@@ -720,14 +570,10 @@ mod tests {
 
     #[test]
     fn a_snapshot_from_the_future_is_treated_as_fresh() {
-        // A clock moved; trusting a too-new snapshot beats skipping the
-        // whole machine until it settles.
         let mut s = snap();
         s.probed_at = at(10_000);
         assert!(ev(&FETCH, &s).is_eligible());
     }
-
-    // ---- fetch is deliberately permissive -----------------------------
 
     #[test]
     fn fetch_is_not_blocked_by_anything_about_the_worktree() {
@@ -785,8 +631,6 @@ mod tests {
         let off = Policy { fetch_bare: false, ..Default::default() };
         assert_eq!(evaluate(&FETCH, &s, T0, &off).skip_reason(), Some(&SkipReason::BareRepo));
     }
-
-    // ---- pull ----------------------------------------------------------
 
     #[test]
     fn pull_requires_something_to_pull() {
@@ -848,8 +692,6 @@ mod tests {
         assert_eq!(skip(&FF, &s), Some(SkipReason::OperationInProgress(InProgress::Rebase)));
     }
 
-    // ---- push ----------------------------------------------------------
-
     #[test]
     fn push_ignores_worktree_dirtiness() {
         let mut s = sync(2, 0);
@@ -890,12 +732,8 @@ mod tests {
             Some(&SkipReason::SnapshotStale),
             "fetched 5000s ago"
         );
-
-        // The scheduler's own clock counts too, and the newer of the two wins.
         s.fetch.last_success = Some(at(100_000 - 100));
         assert!(evaluate(&leased, &s, at(100_000), &policy).is_eligible());
-
-        // Never fetched at all is not a lease.
         s.upstream.as_mut().unwrap().last_fetch = None;
         s.fetch.last_success = None;
         assert_eq!(
@@ -913,7 +751,6 @@ mod tests {
         assert!(ev(&with, &s).is_eligible());
         assert_eq!(skip(&without, &s), Some(SkipReason::NoUpstream));
 
-        // ...but only if there is a remote to set it to.
         s.remotes.clear();
         assert_eq!(skip(&with, &s), Some(SkipReason::NoRemote));
     }
@@ -1033,8 +870,6 @@ mod tests {
         );
     }
 
-    // ---- cross-cutting ---------------------------------------------------
-
     #[test]
     fn a_bare_repository_admits_only_fetch_and_custom() {
         let mut s = snap();
@@ -1136,8 +971,6 @@ mod tests {
     }
 }
 
-// ---- automatic fetching -------------------------------------------------
-
 #[cfg(test)]
 mod fetch_schedule {
     use super::*;
@@ -1182,8 +1015,6 @@ mod fetch_schedule {
 
     #[test]
     fn a_repository_with_nothing_to_fetch_from_is_never_due() {
-        // `Disabled`, not perpetually failing: a repository with no remote
-        // must not enter backoff, or it quarantines for the wrong reason.
         let mut s = repo("a");
         s.remotes.clear();
         s.fetch = FetchHealth::disabled();
@@ -1211,8 +1042,6 @@ mod fetch_schedule {
         let mut untrusted = repo("a");
         untrusted.outcome = ProbeOutcome::Error("boom".into());
         assert!(due_at(0, &[untrusted]).is_empty());
-
-        // ...and age alone does not disqualify.
         assert_eq!(due_at(86_400, &[repo("a")]), ["a"]);
     }
 
@@ -1256,8 +1085,6 @@ mod fetch_schedule {
             }
             other => panic!("{other:?}"),
         }
-        // ...and the successful history is kept, so the UI can still say how
-        // long it has been broken.
         assert_eq!(health.last_success, None);
     }
 
@@ -1279,8 +1106,6 @@ mod fetch_schedule {
             last_success: None,
             schedule: FetchSchedule::Quarantined { since: T0, last_error: "no key".into() },
         };
-        // Cleared regardless of outcome: a failing manual fetch starts a
-        // fresh backoff rather than resuming the one being escaped.
         let after = manual_attempt(&quarantined, &id, at(10), Attempt::Failed("still no"), &p);
         assert!(
             matches!(after.schedule, FetchSchedule::BackingOff { failures: 1, .. }),

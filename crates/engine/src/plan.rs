@@ -1,40 +1,62 @@
 //! Turning "pull everything dirty" into a list the user can read and confirm.
-//!
-//! Pure: no I/O, no clock of its own. A plan is free to compute, which lets the
-//! GUI recompute one on every selection change and the CLI offer `--dry-run` as
-//! the default-safe path.
-//!
-//! The rendering lives here rather than in either surface: the CLI and the GUI
-//! must produce *identical* plans, and two renderers would be two
-//! specifications.
 
 use crate::policy::{evaluate, Eligibility, Policy};
 use crate::Selection;
 use git_scylla_core::{template, Action, PullMode, RepoId, RepoSnapshot, ResetMode, SkipReason};
 use git_scylla_core::{undoability, Job, JobState, Undoable};
+use git_scylla_probe::{RefAnswer, RefError, RefQuery};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::time::SystemTime;
 
+pub type RefAnswers = HashMap<RepoId, Result<RefAnswer, RefError>>;
+
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-/// What a batch would do, before it does any of it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Plan {
-    /// The template the user chose.
     pub action: Action,
-    /// One entry per eligible repository, carrying the action **resolved for
-    /// that repository**.
     pub eligible: Vec<(RepoId, Action)>,
     pub skipped: Vec<(RepoId, SkipReason)>,
-    /// How many snapshots were offered, before the selection narrowed them.
-    /// Context for a header, not part of the plan's arithmetic.
     pub considered: usize,
-    /// Something about *these repositories* the action's own words can't say
-    /// — e.g. how many untracked files `stage_all` will sweep up.
     pub warning: Option<String>,
 }
 
+impl<'de> Deserialize<'de> for Plan {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            action: Action,
+            eligible: Vec<(RepoId, Action)>,
+            skipped: Vec<(RepoId, SkipReason)>,
+            considered: usize,
+            warning: Option<String>,
+        }
+        let w = Wire::deserialize(d)?;
+        if let Some((_, action)) = w.eligible.iter().find(|(_, a)| !a.is_resolved()) {
+            return Err(serde::de::Error::custom(format!(
+                "the plan carries an unresolved action ({action}); it would run no commands"
+            )));
+        }
+        Ok(Plan {
+            action: w.action,
+            eligible: w.eligible,
+            skipped: w.skipped,
+            considered: w.considered,
+            warning: w.warning,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PlanTemplate(Plan);
+
+impl PlanTemplate {
+    pub(crate) fn eligible(&self) -> &[(RepoId, Action)] {
+        &self.0.eligible
+    }
+}
+
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-/// Skips sharing one reason, expandable to the repository list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkipGroup {
     pub reason: SkipReason,
@@ -42,10 +64,6 @@ pub struct SkipGroup {
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-/// One distinct resolved action and the repositories that got it.
-///
-/// Usually one entry. More than one means resolution produced different
-/// commands, which the plan must surface rather than hide behind a single
 /// header.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionVariant {
@@ -53,37 +71,39 @@ pub struct ActionVariant {
     pub repos: Vec<RepoId>,
 }
 
-/// Evaluate an action against a set of snapshots. Takes `now` and `policy`
-/// explicitly to stay pure.
 pub fn plan(
     action: &Action,
     snaps: &[RepoSnapshot],
     sel: &Selection,
     now: SystemTime,
     policy: &Policy,
-) -> Plan {
+) -> PlanTemplate {
     let now_for_template = now;
     let mut eligible = Vec::new();
     let mut skipped = Vec::new();
 
     for snap in snaps {
         if !sel.contains(snap) {
-            // Not reported as a skip; `considered` carries that context instead.
             continue;
         }
         match evaluate(action, snap, now, policy) {
             Eligibility::Eligible => {
-                eligible.push((snap.id.clone(), resolve(action, snap, now_for_template)))
+                eligible.push((snap.id.clone(), resolve_template(action, snap, now_for_template)))
             }
             Eligibility::Skip(why) => skipped.push((snap.id.clone(), why)),
         }
     }
 
     let warning = warn_about(action, snaps, &eligible);
-    Plan { action: action.clone(), eligible, skipped, considered: snaps.len(), warning }
+    PlanTemplate(Plan {
+        action: action.clone(),
+        eligible,
+        skipped,
+        considered: snaps.len(),
+        warning,
+    })
 }
 
-/// What the eligible repositories are about to do that the action cannot say.
 fn warn_about(
     action: &Action,
     snaps: &[RepoSnapshot],
@@ -102,8 +122,6 @@ fn warn_about(
                 )
             })
         }
-        // Dirtiness doesn't block a tag (it names a commit, not the worktree),
-        // so warn how many of these are dirty.
         Action::DevTag { .. } => {
             let dirty = mine().filter(|s| !s.is_clean()).count();
             (dirty > 0).then(|| {
@@ -118,12 +136,7 @@ fn warn_about(
     }
 }
 
-/// Resolve a template action for one repository.
-///
-/// Exhaustive on purpose: adding an `Action` variant forces a decision here
-/// about whether it has per-repository parameters, which is the whole point of
-/// the seam. Today only `Push` does.
-fn resolve(template: &Action, snap: &RepoSnapshot, now: SystemTime) -> Action {
+fn resolve_template(template: &Action, snap: &RepoSnapshot, now: SystemTime) -> Action {
     match template {
         Action::Push { set_upstream: Some(wanted), force_with_lease } => Action::Push {
             set_upstream: Some(preferred_remote(snap, wanted)),
@@ -138,12 +151,9 @@ fn resolve(template: &Action, snap: &RepoSnapshot, now: SystemTime) -> Action {
         Action::Checkout { rev, create } => {
             Action::Checkout { rev: template::render(rev, snap, now), create: *create }
         }
-        Action::Branch { name, from } => Action::Branch {
-            name: template::render(name, snap, now),
-            from: from.clone(),
-        },
-        // Remote resolves like a push's; the *name* is resolved by the engine
-        // (needs tags, which this function can't see).
+        Action::Branch { name, from } => {
+            Action::Branch { name: template::render(name, snap, now), from: from.clone() }
+        }
         Action::DevTag { channel, bump, name, push: Some(wanted) } => Action::DevTag {
             channel: channel.clone(),
             bump: *bump,
@@ -155,21 +165,13 @@ fn resolve(template: &Action, snap: &RepoSnapshot, now: SystemTime) -> Action {
         | Action::Push { set_upstream: None, .. }
         | Action::Stash { .. }
         | Action::StashPop
-        // Resolved by `undo`, not here: needs the per-repository job, which
-        // this function can't see.
         | Action::Reset { .. }
-        // Resolved by the engine: needs `refs/` state (default branch, existing
-        // tags) this pure function can't see. See
-        // `Engine::resolve_default_branches`/`resolve_tag_names`.
         | Action::SyncDefault { .. }
         | Action::DevTag { push: None, .. }
         | Action::Custom { .. } => template.clone(),
     }
 }
 
-/// Which remote this repository should set its upstream to: the requested
-/// name if present, else `origin`, else the first remote. Safe only because
-/// the plan displays the resolved command before it runs.
 fn preferred_remote(snap: &RepoSnapshot, wanted: &str) -> String {
     let has = |name: &str| snap.remotes.iter().any(|r| r.name == name);
     if has(wanted) {
@@ -180,26 +182,19 @@ fn preferred_remote(snap: &RepoSnapshot, wanted: &str) -> String {
     }
     match snap.remotes.first() {
         Some(r) => r.name.clone(),
-        // Unreachable via `plan` (no-remotes repos are refused earlier);
-        // returns the request to keep this total rather than panicking.
         None => wanted.to_string(),
     }
 }
 
 impl Plan {
-    /// Repositories the plan actually covers: eligible plus skipped.
     pub fn selected(&self) -> usize {
         self.eligible.len() + self.skipped.len()
     }
 
-    /// Nothing will run. The sheet then explains why and offers no execute
-    /// button.
     pub fn is_empty(&self) -> bool {
         self.eligible.is_empty()
     }
 
-    /// Skips grouped by reason, descending by count; ties break on the
-    /// rendered reason for deterministic ordering.
     pub fn skip_groups(&self) -> Vec<SkipGroup> {
         let mut groups: Vec<SkipGroup> = Vec::new();
         for (id, reason) in &self.skipped {
@@ -217,7 +212,6 @@ impl Plan {
         groups
     }
 
-    /// The distinct resolved actions, most-used first.
     pub fn action_variants(&self) -> Vec<ActionVariant> {
         let mut variants: Vec<ActionVariant> = Vec::new();
         for (id, action) in &self.eligible {
@@ -237,8 +231,6 @@ impl Plan {
         variants
     }
 
-    /// The plan as something to show a person. Every displayed string is
-    /// built here once, so the CLI and GUI can't diverge.
     pub fn view(&self) -> PlanView {
         let w = words(&self.action);
         let eligible = (!self.eligible.is_empty()).then(|| PlanRow {
@@ -258,7 +250,6 @@ impl Plan {
             })
             .collect();
 
-        // A single resolved command is already in the headline; only list several.
         let variants = match self.action_variants() {
             v if v.len() < 2 && !w.show_commands => Vec::new(),
             v => v
@@ -286,7 +277,6 @@ impl Plan {
             eligible,
             skips,
             variants,
-            // `None` means no execute control at all, not a disabled one.
             confirm_label: (!self.is_empty()).then(|| header(&w, self.eligible.len())),
             confirm_guard: (!self.is_empty())
                 .then(|| guard(&self.action, self.eligible.len()))
@@ -302,32 +292,17 @@ impl Plan {
         }
     }
 
-    /// The plan as text.
-    ///
-    /// ```text
-    /// Pull 47 repos (rebase)
-    ///   ✓ 31 will pull   behind, clean, upstream present
-    ///   ⏭  9 skipped     already up to date
-    /// ```
     pub fn render(&self) -> String {
         self.view().render()
     }
 }
 
-/// What undoing a finished batch would do.
-///
-/// An ordinary plan: same type, same sheet, same skip reasons, same
-/// confirmation. Each repository resets to its own `head_before`.
-///
-/// Requires:
-/// * the action is undoable — [`undoability`];
-/// * `HEAD` is still where the job left it (otherwise something was committed
-///   on top, and undoing would discard it);
-/// * a clean worktree and no operation in progress — from
-///   [`crate::policy::evaluate`], which also checks staleness.
-///
-/// The caller must have re-probed; a stale snapshot is refused by name.
-pub fn undo(jobs: &[Job], snaps: &[RepoSnapshot], now: SystemTime, policy: &Policy) -> Plan {
+pub fn undo(
+    jobs: &[Job],
+    snaps: &[RepoSnapshot],
+    now: SystemTime,
+    policy: &Policy,
+) -> PlanTemplate {
     let by_id: std::collections::HashMap<&RepoId, &RepoSnapshot> =
         snaps.iter().map(|s| (&s.id, s)).collect();
     let mut eligible = Vec::new();
@@ -340,14 +315,10 @@ pub fn undo(jobs: &[Job], snaps: &[RepoSnapshot], now: SystemTime, policy: &Poli
             skipped.push((repo, SkipReason::NotUndoable(why.to_string())));
             continue;
         }
-        // Nothing to repair if the job didn't succeed; reported as a skip so
-        // the batch still accounts for every repo.
         if job.state != JobState::Ok {
             skipped.push((repo, SkipReason::NotUndoable("the job did not run".into())));
             continue;
         }
-        // A switch is undone by switching back; resetting would move the
-        // branch it switched to.
         let repair = match how {
             Undoable::Switch => match &job.branch_before {
                 Some(branch) => Some(Action::Checkout { rev: branch.clone(), create: false }),
@@ -370,9 +341,6 @@ pub fn undo(jobs: &[Job], snaps: &[RepoSnapshot], now: SystemTime, policy: &Poli
             skipped.push((repo, SkipReason::SnapshotStale));
             continue;
         };
-        // Compares against `head_after`, not `head_before`: only that
-        // distinguishes "moved by this job" from "moved by this job, then
-        // committed on".
         if job.head_after.is_some() && snap.head_oid != job.head_after {
             skipped.push((repo, SkipReason::HeadMoved));
             continue;
@@ -384,91 +352,159 @@ pub fn undo(jobs: &[Job], snaps: &[RepoSnapshot], now: SystemTime, policy: &Poli
     }
 
     let considered = jobs.len();
-    // Template mirrors whatever shape the repairs took, so the headline warns
-    // correctly (e.g. only a hard reset says it discards work).
     let template = eligible.iter().map(|(_, a)| a.clone()).next().unwrap_or(Action::Reset {
         to: git_scylla_core::Oid::parse("0000000").expect("static oid"),
         mode: ResetMode::Hard,
     });
-    Plan { action: template, eligible, skipped, considered, warning: None }
+    PlanTemplate(Plan { action: template, eligible, skipped, considered, warning: None })
+}
+
+pub(crate) fn no_undo() -> PlanTemplate {
+    PlanTemplate(Plan {
+        action: Action::Reset {
+            to: git_scylla_core::Oid::parse("0000000").expect("static oid"),
+            mode: ResetMode::Hard,
+        },
+        eligible: Vec::new(),
+        skipped: Vec::new(),
+        considered: 0,
+        warning: None,
+    })
+}
+
+pub(crate) fn queries_for(t: &PlanTemplate) -> Vec<(RefQuery, Vec<RepoId>)> {
+    let mut groups: Vec<(RefQuery, Vec<RepoId>)> = Vec::new();
+    for (id, action) in t.eligible() {
+        let Some(query) = query_of(action) else { continue };
+        match groups.iter_mut().find(|(q, _)| q == &query) {
+            Some((_, ids)) => ids.push(id.clone()),
+            None => groups.push((query, vec![id.clone()])),
+        }
+    }
+    groups
+}
+
+fn query_of(action: &Action) -> Option<RefQuery> {
+    match action {
+        // `create: true` makes the ref rather than requiring it.
+        Action::Checkout { rev, create: false } => Some(RefQuery::Exists { rev: rev.clone() }),
+        Action::SyncDefault { .. } => Some(RefQuery::DefaultBranch),
+        Action::DevTag { .. } => Some(RefQuery::Tags),
+        Action::Checkout { create: true, .. }
+        | Action::Fetch { .. }
+        | Action::Pull { .. }
+        | Action::Push { .. }
+        | Action::Commit { .. }
+        | Action::Stash { .. }
+        | Action::StashPop
+        | Action::Branch { .. }
+        | Action::Reset { .. }
+        | Action::Custom { .. } => None,
+    }
+}
+
+pub fn resolve(t: PlanTemplate, snaps: &[RepoSnapshot], answers: &RefAnswers) -> Plan {
+    let by_id: HashMap<&RepoId, &RepoSnapshot> = snaps.iter().map(|s| (&s.id, s)).collect();
+    let mut p = t.0;
+    let mut kept = Vec::with_capacity(p.eligible.len());
+    for (id, action) in std::mem::take(&mut p.eligible) {
+        match finish(&id, action, &by_id, answers) {
+            Ok(action) => kept.push((id, action)),
+            Err(why) => p.skipped.push((id, why)),
+        }
+    }
+    p.eligible = kept;
+    p
+}
+
+fn finish(
+    id: &RepoId,
+    action: Action,
+    by_id: &HashMap<&RepoId, &RepoSnapshot>,
+    answers: &RefAnswers,
+) -> Result<Action, SkipReason> {
+    match action {
+        Action::Checkout { ref rev, create: false } => match answers.get(id) {
+            Some(Ok(RefAnswer::Exists(Some(false)))) => Err(SkipReason::RefNotFound(rev.clone())),
+            None => Err(SkipReason::SnapshotStale),
+            _ => Ok(action),
+        },
+
+        Action::SyncDefault { mode, plan: None } => {
+            let Some(snap) = by_id.get(id) else { return Err(SkipReason::SnapshotStale) };
+            let default = match answers.get(id) {
+                Some(Ok(RefAnswer::DefaultBranch(Some(name)))) => name.clone(),
+                Some(Ok(RefAnswer::DefaultBranch(None))) => {
+                    return Err(SkipReason::NoDefaultBranch)
+                }
+                _ => return Err(SkipReason::SnapshotStale),
+            };
+            let Some(back_to) = snap.branch().map(str::to_string) else {
+                return Err(SkipReason::DetachedHead);
+            };
+            let sync = git_scylla_core::SyncPlan {
+                default,
+                back_to,
+                stash: snap.work.staged > 0 || snap.work.modified > 0,
+            };
+            if let Eligibility::Skip(why) = crate::policy::sync_default_resolved(snap, &sync) {
+                return Err(why);
+            }
+            Ok(Action::SyncDefault { mode, plan: Some(sync) })
+        }
+
+        Action::DevTag { channel, bump, name: None, push } => {
+            let Some(Ok(RefAnswer::Tags(have))) = answers.get(id) else {
+                return Err(SkipReason::SnapshotStale);
+            };
+            let name = git_scylla_core::version::next_dev_tag(have, &channel, bump);
+            Ok(Action::DevTag { channel, bump, name: Some(name), push })
+        }
+        _ => Ok(action),
+    }
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-/// A plan reduced to the strings a surface displays, and nothing else.
-/// Deliberately free of `Action`/`SkipReason` so no surface can phrase them
-/// itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanView {
-    /// `Pull 47 repos (rebase)` — the whole selection, eligible or not.
     pub headline: String,
-    /// `47 of 100 selected`, when the selection narrowed the working set.
     pub selection_note: Option<String>,
-    /// The heading over [`Self::variants`], or `None` when there are none.
-    /// Computed here, not per-surface, to avoid a wrong plural like "resolved
-    /// to 1 different commands".
     pub variants_note: Option<String>,
-    /// What will run. `None` when nothing qualifies.
     pub eligible: Option<PlanRow>,
-    /// What will not, grouped by reason and descending by count.
     pub skips: Vec<PlanRow>,
-    /// Every distinct resolved command, when resolution produced more than one.
-    /// Empty otherwise — see [`Plan::action_variants`].
     pub variants: Vec<PlanVariant>,
-    /// The confirm control's label, stated as its effect: `Pull 31 repos
-    /// (rebase)`, never `Confirm`. `None` means there must be no control.
     pub confirm_label: Option<String>,
-    /// Something the user must do before the control works at all. Reserved
-    /// for genuinely irreversible actions, so the danger styling keeps
-    /// meaning.
     pub confirm_guard: Option<ConfirmGuard>,
-    /// Why there is nothing to do, when there is nothing to do.
     pub empty_note: Option<String>,
-    /// See [`Plan::warning`].
     pub warning: Option<String>,
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-/// A deliberate obstacle between a plan and running it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
 pub enum ConfirmGuard {
-    /// Type the number of repositories this will touch. Not a checkbox or a
-    /// second button — those become muscle memory; typing a number that
-    /// tracks the selection forces actually reading the plan.
     TypeCount(usize),
-    /// Acknowledge, in words, what the tool does not know about this action.
     Acknowledge(String),
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-/// One line of a plan: a count, what happens to it, and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanRow {
     pub count: usize,
-    /// `will pull`, or `skipped`.
     pub phrase: String,
-    /// `behind, clean, upstream present`, or `already up to date`.
     pub detail: String,
-    /// Expandable to the repositories themselves, so a surprising count can be
-    /// checked rather than trusted.
     pub repos: Vec<RepoId>,
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-/// One resolved command, already rendered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanVariant {
-    /// `git push --set-upstream origin`, as [`Action`] renders itself.
     pub command: String,
-    /// Who this is for: the repository's name if it's the only one, else the
-    /// count. A bare count is useless when every row has exactly one repo
-    /// (the normal case for a derived name like a tag).
     pub label: String,
     pub repos: Vec<RepoId>,
 }
 
 impl PlanView {
-    /// The text form. The GUI renders these same fields as a sheet.
     pub fn render(&self) -> String {
         let rows: Vec<(char, &PlanRow)> = self
             .eligible
@@ -478,8 +514,6 @@ impl PlanView {
             .collect();
 
         let count_w = rows.iter().map(|(_, r)| r.count.to_string().len()).max().unwrap_or(1);
-        // Floor under the phrase column so the detail column aligns across
-        // actions of different phrase lengths.
         const PHRASE_MIN: usize = 15;
         let phrase_w = rows.iter().map(|(_, r)| r.phrase.len()).max().unwrap_or(0).max(PHRASE_MIN);
 
@@ -517,28 +551,11 @@ impl PlanView {
     }
 }
 
-// ---- presentation ------------------------------------------------------
-//
-// Lives here, not on `Action` in `core`: these strings are plan-specific view
-// text, not domain. `Action::label()` stays in `core` for callers without a
-// plan.
-
-/// Everything a plan says about one action, resolved in one place, so one
-/// action's phrasing can't disagree with itself across fields.
 struct Words {
-    /// Head of the headline: `Pull`, `Check out on`.
     verb: &'static str,
-    /// The parenthesised detail: `rebase`, `force-with-lease`.
     qualifier: Option<String>,
-    /// What the eligible ones will do: `will pull`.
     will: &'static str,
-    /// Why they qualify: `behind, clean, upstream present`. Mirrors a skip
-    /// reason so the user can check the tool's reasoning, not just trust the
-    /// count.
     rationale: &'static str,
-    /// List the resolved commands even when every repository resolved to the
-    /// same one — needed when the headline can't say it (e.g. sync's per-repo
-    /// branch isn't in the template).
     show_commands: bool,
 }
 
@@ -569,7 +586,6 @@ fn words(action: &Action) -> Words {
         Action::Push { set_upstream, force_with_lease } => Words {
             verb: "Push",
             qualifier: match (set_upstream, force_with_lease) {
-                // Worst-first: the dangerous half must be the one read.
                 (_, true) => Some("force-with-lease".into()),
                 (Some(r), false) => Some(format!("set upstream to {r}")),
                 (None, false) => None,
@@ -593,8 +609,6 @@ fn words(action: &Action) -> Words {
         },
         Action::Commit { stage_all, no_verify, .. } => Words {
             verb: "Commit in",
-            // `--no-verify` belongs in the headline, not just the flags typed,
-            // so bypassing hooks is visible at confirm time.
             qualifier: match (stage_all, no_verify) {
                 (true, true) => Some("stage all, including untracked; no hooks".into()),
                 (true, false) => Some("stage all, including untracked".into()),
@@ -631,9 +645,6 @@ fn words(action: &Action) -> Words {
         },
         Action::Reset { to, mode } => Words {
             verb: "Undo in",
-            // No commit in the qualifier: forty repos have forty different
-            // commits. The headline carries the danger instead; resolved
-            // commands (with their own commit) are listed separately.
             qualifier: Some(match mode {
                 ResetMode::Hard => "reset --hard; discards uncommitted work".into(),
                 ResetMode::Soft => format!("reset --soft to {}", to.short()),
@@ -644,9 +655,6 @@ fn words(action: &Action) -> Words {
         },
         Action::SyncDefault { mode, .. } => Words {
             verb: "Sync default branch in",
-            // Branch deliberately absent: each repo resolves its own, so
-            // naming one (e.g. `main`) would misrepresent repos on `master`.
-            // `show_commands` surfaces it instead.
             qualifier: Some(mode.to_string()),
             will: "will sync",
             rationale: "on a branch, has a remote; work in the way is stashed and put back",
@@ -659,8 +667,6 @@ fn words(action: &Action) -> Words {
                 None => format!("{channel}, {bump} bump, local only"),
             }),
             will: "will be tagged",
-            // Name is per-repository, so it only appears in the resolved
-            // list, as with sync.
             show_commands: true,
             rationale: "has a commit to tag",
         },
@@ -675,9 +681,6 @@ fn words(action: &Action) -> Words {
     }
 }
 
-/// What, if anything, must be done before this plan may run. Only two actions
-/// qualify: a lease push (accepted = irreversible) and a custom command (no
-/// engine opinion at all).
 fn guard(action: &Action, count: usize) -> Option<ConfirmGuard> {
     match action {
         Action::Push { force_with_lease: true, .. } => Some(ConfirmGuard::TypeCount(count)),
@@ -723,11 +726,232 @@ mod tests {
     }
 
     fn plan_all(action: &Action, snaps: &[RepoSnapshot]) -> Plan {
-        plan(action, snaps, &Selection::All, NOW, &Policy::default())
+        plan(action, snaps, &Selection::All, NOW, &Policy::default()).0
     }
 
-    /// A worked example: 31 pullable, 9 up to date, 4 without an upstream,
-    /// 2 dirty, 1 mid-rebase.
+    fn answered(id: &RepoId, a: Option<Result<RefAnswer, RefError>>) -> RefAnswers {
+        let mut m = RefAnswers::new();
+        if let Some(a) = a {
+            m.insert(id.clone(), a);
+        }
+        m
+    }
+
+    fn one(
+        action: Action,
+        snap: RepoSnapshot,
+        answer: Option<Result<RefAnswer, RefError>>,
+    ) -> Result<Action, SkipReason> {
+        let snaps = vec![snap];
+        let t = plan(&action, &snaps, &Selection::All, NOW, &Policy::default());
+        assert_eq!(t.eligible().len(), 1, "the fixture must survive the first gate");
+        let answers = answered(&snaps[0].id, answer);
+        let p = resolve(t, &snaps, &answers);
+        match (p.eligible.first(), p.skipped.first()) {
+            (Some((_, a)), None) => Ok(a.clone()),
+            (None, Some((_, why))) => Err(why.clone()),
+            other => panic!("expected exactly one outcome, got {other:?}"),
+        }
+    }
+
+    fn unreadable() -> RefError {
+        RefError::Unreadable {
+            path: "/r/r/.git".into(),
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        }
+    }
+
+    fn on_branch(name: &str, branch: &str) -> RepoSnapshot {
+        let mut s = tracked(name, 0, 0);
+        s.head = Head::Branch(branch.into());
+        s
+    }
+
+    #[test]
+    fn a_checkout_is_refused_only_by_a_definite_no() {
+        let action = || Action::Checkout { rev: "release".into(), create: false };
+        let snap = || on_branch("r", "main");
+
+        assert_eq!(
+            one(action(), snap(), Some(Ok(RefAnswer::Exists(Some(false))))),
+            Err(SkipReason::RefNotFound("release".into()))
+        );
+        assert!(one(action(), snap(), Some(Ok(RefAnswer::Exists(Some(true))))).is_ok());
+        assert!(one(action(), snap(), Some(Ok(RefAnswer::Exists(None)))).is_ok());
+        assert!(one(action(), snap(), Some(Err(unreadable()))).is_ok());
+    }
+
+    #[test]
+    fn a_row_that_needed_an_answer_and_got_none_is_stale_not_refused() {
+        assert_eq!(
+            one(
+                Action::Checkout { rev: "release".into(), create: false },
+                on_branch("r", "main"),
+                None
+            ),
+            Err(SkipReason::SnapshotStale)
+        );
+        assert_eq!(
+            one(
+                Action::SyncDefault { mode: PullMode::FfOnly, plan: None },
+                on_branch("r", "wip"),
+                None
+            ),
+            Err(SkipReason::SnapshotStale)
+        );
+        assert_eq!(
+            one(dev_tag_template(), on_branch("r", "main"), None),
+            Err(SkipReason::SnapshotStale)
+        );
+    }
+
+    fn dev_tag_template() -> Action {
+        Action::DevTag {
+            channel: "dev".into(),
+            bump: git_scylla_core::version::Bump::Minor,
+            name: None,
+            push: None,
+        }
+    }
+
+    #[test]
+    fn no_trunk_and_an_unreadable_repository_are_different_skips() {
+        let sync = || Action::SyncDefault { mode: PullMode::FfOnly, plan: None };
+        assert_eq!(
+            one(sync(), on_branch("r", "wip"), Some(Ok(RefAnswer::DefaultBranch(None)))),
+            Err(SkipReason::NoDefaultBranch)
+        );
+        assert_eq!(
+            one(sync(), on_branch("r", "wip"), Some(Err(unreadable()))),
+            Err(SkipReason::SnapshotStale)
+        );
+    }
+
+    #[test]
+    fn a_sync_off_trunk_stashes_only_tracked_work_and_comes_back() {
+        let mut snap = on_branch("r", "wip");
+        snap.work.modified = 2;
+        snap.work.untracked = 5;
+        let resolved = one(
+            Action::SyncDefault { mode: PullMode::FfOnly, plan: None },
+            snap,
+            Some(Ok(RefAnswer::DefaultBranch(Some("main".into())))),
+        )
+        .expect("off trunk, so the action stashes rather than refusing");
+        let Action::SyncDefault { plan: Some(p), .. } = resolved else { panic!("unresolved") };
+        assert_eq!(p.default, "main");
+        assert_eq!(p.back_to, "wip");
+        assert!(p.stash, "modified files are in the way of the switch");
+    }
+
+    #[test]
+    fn a_sync_already_on_trunk_with_a_dirty_tree_is_a_plain_pull_and_refused() {
+        let mut snap = on_branch("r", "main");
+        snap.work.modified = 1;
+        assert_eq!(
+            one(
+                Action::SyncDefault { mode: PullMode::FfOnly, plan: None },
+                snap,
+                Some(Ok(RefAnswer::DefaultBranch(Some("main".into())))),
+            ),
+            Err(SkipReason::DirtyWorktree)
+        );
+    }
+
+    #[test]
+    fn a_dev_tag_name_comes_from_this_repositorys_own_tags() {
+        let resolved = one(
+            dev_tag_template(),
+            on_branch("r", "main"),
+            Some(Ok(RefAnswer::Tags(vec!["v1.2.0".into(), "v1.3.0-dev.1".into()]))),
+        )
+        .expect("tags answered");
+        let Action::DevTag { name: Some(name), .. } = resolved else { panic!("unresolved") };
+        assert_eq!(name, "v1.3.0-dev.2");
+    }
+
+    #[test]
+    fn an_unreadable_repository_is_never_given_the_first_tag_in_a_series() {
+        assert_eq!(
+            one(dev_tag_template(), on_branch("r", "main"), Some(Err(unreadable()))),
+            Err(SkipReason::SnapshotStale)
+        );
+    }
+
+    #[test]
+    fn an_action_needing_no_cold_facts_asks_nothing() {
+        let snaps = vec![tracked("a", 0, 3), tracked("b", 0, 3)];
+        let t = plan(
+            &Action::Pull { mode: PullMode::Rebase },
+            &snaps,
+            &Selection::All,
+            NOW,
+            &Policy::default(),
+        );
+        assert!(queries_for(&t).is_empty());
+    }
+
+    #[test]
+    fn one_question_of_everyone_is_one_group() {
+        let snaps = vec![on_branch("a", "main"), on_branch("b", "main")];
+        let t = plan(
+            &Action::Checkout { rev: "release".into(), create: false },
+            &snaps,
+            &Selection::All,
+            NOW,
+            &Policy::default(),
+        );
+        let groups = queries_for(&t);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, RefQuery::Exists { rev: "release".into() });
+        assert_eq!(groups[0].1.len(), 2);
+    }
+
+    #[test]
+    fn a_placeholder_rev_asks_each_repository_about_its_own_branch() {
+        let snaps = vec![on_branch("a", "main"), on_branch("b", "main")];
+        let t = plan(
+            &Action::Checkout { rev: "release/{repo}".into(), create: false },
+            &snaps,
+            &Selection::All,
+            NOW,
+            &Policy::default(),
+        );
+        let mut asked: Vec<String> = queries_for(&t)
+            .into_iter()
+            .map(|(q, ids)| {
+                assert_eq!(ids.len(), 1, "each repository asks about itself");
+                match q {
+                    RefQuery::Exists { rev } => rev,
+                    other => panic!("{other:?}"),
+                }
+            })
+            .collect();
+        asked.sort();
+        assert_eq!(asked, vec!["release/a".to_string(), "release/b".to_string()]);
+    }
+
+    #[test]
+    fn a_plan_carrying_a_template_is_refused_at_the_wire() {
+        let snaps = vec![on_branch("r", "wip")];
+        let t = plan(
+            &Action::SyncDefault { mode: PullMode::FfOnly, plan: None },
+            &snaps,
+            &Selection::All,
+            NOW,
+            &Policy::default(),
+        );
+        let json = serde_json::to_string(&t.0).unwrap();
+        let err = serde_json::from_str::<Plan>(&json).unwrap_err().to_string();
+        assert!(err.contains("unresolved"), "{err}");
+
+        let answers =
+            answered(&snaps[0].id, Some(Ok(RefAnswer::DefaultBranch(Some("main".into())))));
+        let p = resolve(t, &snaps, &answers);
+        let back: Plan = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
+    }
+
     fn worked_example() -> Vec<RepoSnapshot> {
         let mut snaps = Vec::new();
         for i in 0..31 {
@@ -756,7 +980,6 @@ mod tests {
         let p = plan_all(&Action::Pull { mode: PullMode::Rebase }, &worked_example());
         assert_eq!(p.selected(), 47);
         assert_eq!(p.eligible.len(), 31);
-        // Every repository is accounted for: nothing silently vanishes.
         assert_eq!(p.eligible.len() + p.skipped.len(), 47);
 
         let groups = p.skip_groups();
@@ -823,7 +1046,7 @@ mod tests {
         let snaps = vec![tracked("a", 0, 3), tracked("b", 0, 3)];
         let sel = Selection::ids([snaps[0].id.clone()]);
         let p =
-            plan(&Action::Pull { mode: PullMode::Rebase }, &snaps, &sel, NOW, &Policy::default());
+            plan(&Action::Pull { mode: PullMode::Rebase }, &snaps, &sel, NOW, &Policy::default()).0;
         assert_eq!(p.selected(), 1);
         assert_eq!(p.considered, 2);
         assert!(p.render().starts_with("Pull 1 repo (rebase) — 1 of 2 selected"), "{}", p.render());
@@ -834,21 +1057,17 @@ mod tests {
         let snaps: Vec<RepoSnapshot> = (0..50).map(|i| tracked(&format!("s{i}"), 0, 3)).collect();
         let sel = Selection::ids([snaps[0].id.clone()]);
         let p =
-            plan(&Action::Pull { mode: PullMode::Rebase }, &snaps, &sel, NOW, &Policy::default());
+            plan(&Action::Pull { mode: PullMode::Rebase }, &snaps, &sel, NOW, &Policy::default()).0;
         assert_eq!(p.skipped.len(), 0);
         assert_eq!(p.eligible.len(), 1);
         assert!(!p.skipped.iter().any(|(_, r)| matches!(r, SkipReason::NotSelected)));
     }
-
-    // ---- per-repository resolution ---------------------------------------
 
     #[test]
     fn eligible_entries_carry_a_resolved_action_not_the_template() {
         let template = Action::Pull { mode: PullMode::Rebase };
         let p = plan_all(&template, &[tracked("a", 0, 3)]);
         assert_eq!(p.eligible.len(), 1);
-        // Equal in value here, but a separate value the executor reads —
-        // what lets a per-repo commit message differ.
         assert_eq!(p.eligible[0].1, template);
         assert_eq!(p.action, template);
     }
@@ -883,8 +1102,6 @@ mod tests {
 
     #[test]
     fn a_plan_that_resolved_to_several_commands_reports_every_one() {
-        // A header reading "Push 3 repos" while one of them pushes somewhere
-        // else is exactly the lie a plan exists to prevent.
         let mut a = tracked("a", 1, 0);
         a.remotes = vec![Remote { name: "origin".into(), host: None }];
         let mut b = tracked("b", 1, 0);
@@ -896,7 +1113,6 @@ mod tests {
         );
         let variants = p.action_variants();
         assert_eq!(variants.len(), 2);
-        // Descending by count, then stable on the rendered command.
         assert_eq!(variants[0].repos.len(), 1);
         assert_eq!(variants[1].repos.len(), 1);
         let commands: Vec<String> = variants.iter().map(|v| v.action.to_string()).collect();
@@ -915,12 +1131,8 @@ mod tests {
         assert_eq!(variants[0].repos.len(), 2);
     }
 
-    // ---- determinism and grouping ----------------------------------------
-
     #[test]
     fn skip_groups_are_expandable_to_the_repository_list() {
-        // The group has to carry the ids, or the UI has to recompute the plan
-        // to answer "which ones?".
         let mut snaps = vec![tracked("a", 0, 0), tracked("b", 0, 0)];
         snaps.push(base("c"));
         let p = plan_all(&Action::Pull { mode: PullMode::Rebase }, &snaps);
@@ -931,7 +1143,6 @@ mod tests {
 
     #[test]
     fn equal_counts_group_in_a_stable_order() {
-        // Order must be deterministic across runs.
         let mut dirty = tracked("dirty", 0, 3);
         dirty.work.modified = 1;
         let snaps = vec![tracked("utd", 0, 0), base("noup"), dirty];
@@ -959,12 +1170,11 @@ mod tests {
             &Selection::All,
             NOW + Duration::from_secs(60),
             &policy,
-        );
+        )
+        .0;
         assert_eq!(p.eligible.len(), 0);
         assert_eq!(p.skipped, vec![(old.id.clone(), SkipReason::SnapshotStale)]);
     }
-
-    // ---- headers ---------------------------------------------------------
 
     #[test]
     fn headers_name_what_is_about_to_happen() {
@@ -1001,7 +1211,6 @@ mod tests {
 
     #[test]
     fn a_force_with_lease_batch_is_labelled_by_its_dangerous_half() {
-        // If a batch is doing both, the half that must be read is the force.
         let both = Action::Push { set_upstream: Some("origin".into()), force_with_lease: true };
         assert_eq!(words(&both).qualifier.as_deref(), Some("force-with-lease"));
     }
@@ -1013,19 +1222,14 @@ mod tests {
 
     #[test]
     fn custom_admits_that_it_checked_nothing() {
-        // Honestly labelled as unguarded. A rationale claiming otherwise would
-        // be the most dangerous string in the program.
         assert_eq!(
             words(&Action::Custom { args: vec![], network: true, mutating: true }).rationale,
             "no preconditions apply"
         );
     }
 
-    // ---- performance ------------------------------------------------------
-
     #[test]
     fn planning_a_hundred_repositories_is_free() {
-        // GUI recomputes on every selection change, so this must stay cheap.
         let snaps: Vec<RepoSnapshot> =
             (0..100)
                 .map(|i| {
@@ -1040,12 +1244,10 @@ mod tests {
         let sel = Selection::parse("branch:main", None).unwrap();
         let policy = Policy::default();
 
-        // Median of several runs; a single timing measures the machine, not
-        // the code.
         let mut times = Vec::new();
         for _ in 0..21 {
             let start = std::time::Instant::now();
-            let p = plan(&action, &snaps, &sel, NOW, &policy);
+            let p = plan(&action, &snaps, &sel, NOW, &policy).0;
             times.push(start.elapsed());
             assert_eq!(p.selected(), 100);
         }
@@ -1056,8 +1258,6 @@ mod tests {
     }
     #[test]
     fn the_confirm_label_counts_what_will_run_not_what_was_selected() {
-        // Headline covers the selection; the confirm button covers the effect
-        // — using the headline's count would overstate the blast radius.
         let v = plan_all(&Action::Pull { mode: PullMode::Rebase }, &worked_example()).view();
         assert_eq!(v.headline, "Pull 47 repos (rebase)");
         assert_eq!(v.confirm_label.as_deref(), Some("Pull 31 repos (rebase)"));
@@ -1067,8 +1267,6 @@ mod tests {
 
     #[test]
     fn the_view_carries_the_repositories_behind_every_count() {
-        // Every count must expand to its repository list, or it's just a
-        // number to trust blindly.
         let v = plan_all(&Action::Pull { mode: PullMode::Rebase }, &worked_example()).view();
         assert_eq!(v.eligible.as_ref().unwrap().repos.len(), 31);
         for row in &v.skips {
@@ -1083,8 +1281,6 @@ mod tests {
 
     #[test]
     fn an_empty_plan_offers_no_confirm_control_at_all() {
-        // Not a disabled button — no execute control at all, and `None` is the
-        // only way to say that in a type.
         let snaps = vec![tracked("a", 0, 0), tracked("b", 0, 0)];
         let v = plan_all(&Action::Pull { mode: PullMode::Rebase }, &snaps).view();
         assert_eq!(v.confirm_label, None);
@@ -1093,7 +1289,6 @@ mod tests {
             v.empty_note.as_deref(),
             Some("Nothing to do: no repository in the selection is eligible.")
         );
-        // ...and it still explains itself.
         assert_eq!(v.skips.len(), 1);
         assert_eq!(v.skips[0].detail, "already up to date");
     }
@@ -1108,8 +1303,6 @@ mod tests {
 
     #[test]
     fn several_resolved_commands_reach_the_view_and_the_text_alike() {
-        // Must survive into both the view and the text, or only one tells
-        // the truth.
         let mut a = tracked("a", 1, 0);
         a.remotes = vec![Remote { name: "origin".into(), host: None }];
         let mut b = tracked("b", 1, 0);
@@ -1130,8 +1323,6 @@ mod tests {
 
     #[test]
     fn a_command_with_one_repository_is_labelled_by_name_not_by_count() {
-        // Forty rows reading `1` beside forty different tags is not a plan
-        // anybody can check. The normal shape for a derived name.
         let mut a = tracked("a", 1, 0);
         a.remotes = vec![Remote { name: "origin".into(), host: None }];
         let mut b = tracked("b", 1, 0);
@@ -1147,8 +1338,6 @@ mod tests {
 
     #[test]
     fn one_command_is_not_announced_in_the_plural() {
-        // Regression guard: `show_commands` can display a single variant,
-        // which must not read as plural.
         let mut a = tracked("a", 1, 0);
         a.remotes = vec![Remote { name: "origin".into(), host: None }];
         let action = Action::SyncDefault { mode: PullMode::FfOnly, plan: None };
@@ -1168,8 +1357,6 @@ mod tests {
 
     #[test]
     fn the_view_is_the_only_source_of_the_text() {
-        // Guards that `render` never grows a string of its own — anything not
-        // in the view, the GUI (which only sees the view) would silently miss.
         let p = plan_all(&Action::Pull { mode: PullMode::Rebase }, &worked_example());
         let v = p.view();
         let text = p.render();
@@ -1188,8 +1375,6 @@ mod tests {
             assert!(text.contains(phrase.as_str()), "{phrase:?} missing from:\n{text}");
         }
 
-        // ...and nothing else is in there. Strip every phrase and what remains
-        // is punctuation, digits and the row markers.
         let mut residue = text.clone();
         for phrase in &expected {
             residue = residue.replace(phrase.as_str(), "");

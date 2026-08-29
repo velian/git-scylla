@@ -1,7 +1,7 @@
 //! The engine end to end.
 //!
 //! Everything here uses local bare repositories as remotes, so the whole suite
-//! runs with no network — which is itself one of the criteria.
+//! runs with no network
 
 use git_scylla_core::{Action, JobOrigin, JobState, PullMode, RepoId, SkipReason};
 use git_scylla_engine::sched::Limits;
@@ -10,8 +10,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
-
-// ---- fixtures ----------------------------------------------------------
 
 fn git(cwd: &Path, args: &[&str]) -> std::process::Output {
     let out = Command::new("git")
@@ -29,11 +27,6 @@ fn git(cwd: &Path, args: &[&str]) -> std::process::Output {
     out
 }
 
-/// A bare repository with one commit, plus `n` clones of it under `repos/`.
-///
-/// One origin rather than `n` of them: the point is `n` concurrent fetches, and
-/// building twenty bare repositories to prove that is twenty times the setup for
-/// the same assertion.
 struct Cloned {
     dir: PathBuf,
     repos: PathBuf,
@@ -64,7 +57,6 @@ fn clones(dir: &Path, n: usize) -> Cloned {
     Cloned { dir, repos }
 }
 
-/// Move `origin` forward, so every clone is one behind after a fetch.
 fn advance(c: &Cloned) {
     let seed = c.dir.join("scratch/seed");
     std::fs::write(seed.join("a.txt"), "two\n").unwrap();
@@ -74,8 +66,6 @@ fn advance(c: &Cloned) {
 
 fn config() -> Config {
     Config {
-        // Hermetic: a developer's ~/.gitconfig must not be able to change a
-        // result here.
         extra_env: vec![
             ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
             ("GIT_CONFIG_SYSTEM".into(), "/dev/null".into()),
@@ -90,7 +80,6 @@ fn config() -> Config {
     }
 }
 
-/// Run a batch and collect every job once it settles.
 async fn run(h: &EngineHandle, p: Plan) -> Vec<git_scylla_core::Job> {
     let mut events = h.subscribe();
     let batch = h.start_batch(p, JobOrigin::User).await.unwrap();
@@ -104,10 +93,6 @@ async fn run(h: &EngineHandle, p: Plan) -> Vec<git_scylla_core::Job> {
     h.jobs(batch).await.unwrap()
 }
 
-/// Poll the engine's snapshots until `pred` holds, or give up.
-///
-/// The engine is asynchronous by design: a job finishing and the tool's view of
-/// the repository catching up are two events, in that order.
 async fn wait_until(
     h: &EngineHandle,
     within: Duration,
@@ -122,8 +107,6 @@ async fn wait_until(
     }
     false
 }
-
-// ---- scanning ----------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_scan_finds_and_probes_every_repository() {
@@ -152,20 +135,11 @@ async fn a_scan_of_a_missing_root_finishes_rather_than_hanging() {
     engine.shutdown().await;
 }
 
-// ---- acceptance: the ff-only partition ---------------------------------
-
 #[tokio::test(flavor = "multi_thread")]
 async fn ff_only_partitions_exactly_as_expected() {
-    // `pull --mode ff-only --dry-run` must produce exactly the expected
-    // eligible/skipped partition.
     let tmp = tempfile::tempdir().unwrap();
     let c = clones(tmp.path(), 4);
     advance(&c);
-
-    // r00: behind and clean        -> eligible
-    // r01: behind and dirty        -> DirtyWorktree
-    // r02: behind and ahead        -> Diverged (ff-only cannot)
-    // r03: never fetched, in sync  -> UpToDate
     for name in ["r00", "r01", "r02"] {
         git(&c.repos.join(name), &["fetch"]);
     }
@@ -193,8 +167,6 @@ async fn ff_only_partitions_exactly_as_expected() {
     engine.shutdown().await;
 }
 
-// ---- acceptance: a batch of 20 fetches ---------------------------------
-
 #[tokio::test(flavor = "multi_thread")]
 async fn twenty_fetches_complete_with_retrievable_transcripts() {
     let tmp = tempfile::tempdir().unwrap();
@@ -220,11 +192,6 @@ async fn twenty_fetches_complete_with_retrievable_transcripts() {
         assert_eq!(log.len(), job.log.len());
     }
 
-    // The fetch really happened: every clone now knows it is behind.
-    //
-    // Polled rather than read once, because `BatchDone` fires when the jobs
-    // finish and the re-probes land after it — see the note on the event. A
-    // single read here would be a race that passes on a fast machine.
     let settled = wait_until(&h, Duration::from_secs(20), |snaps| {
         snaps.len() == 20
             && snaps.iter().all(|s| s.upstream.as_ref().and_then(|u| u.behind()) == Some(1))
@@ -242,8 +209,6 @@ async fn twenty_fetches_complete_with_retrievable_transcripts() {
     );
     engine.shutdown().await;
 }
-
-// ---- acceptance: head_before ------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn every_mutating_job_records_head_before() {
@@ -276,7 +241,6 @@ async fn every_mutating_job_records_head_before() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unborn_repository_records_no_head_before() {
-    // The documented exception: there is no commit to name.
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().canonicalize().unwrap();
     let repo = dir.join("repos/unborn");
@@ -289,9 +253,9 @@ async fn an_unborn_repository_records_no_head_before() {
     let snaps = h.scan_to_completion(vec![dir.join("repos")], false).await.unwrap().snapshots;
     assert_eq!(snaps.len(), 1);
 
-    // Commit is mutating, so head_before is attempted — and correctly absent.
     let action = Action::Commit { message: "first".into(), stage_all: true, no_verify: false };
-    let p = plan(&action, &snaps, &Selection::All, std::time::SystemTime::now(), &config().policy);
+    let t = plan(&action, &snaps, &Selection::All, std::time::SystemTime::now(), &config().policy);
+    let p = git_scylla_engine::resolve(t, &snaps, &git_scylla_engine::RefAnswers::new());
     assert_eq!(p.eligible.len(), 1, "an unborn repository with content can commit");
 
     let jobs = run(&h, p).await;
@@ -300,17 +264,10 @@ async fn an_unborn_repository_records_no_head_before() {
     engine.shutdown().await;
 }
 
-// ---- acceptance: an unreachable remote --------------------------------
-
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unreachable_remote_fails_fast_without_stalling_the_batch() {
     let tmp = tempfile::tempdir().unwrap();
     let c = clones(tmp.path(), 5);
-    // Loopback port 1: the kernel refuses instantly, so this needs no network
-    // and its timing is deterministic. A *silently dropped* route is the other
-    // shape of unreachable, and it takes as long as the OS TCP handshake — 4 to
-    // 75 seconds, measured — which is bounded by the job deadline rather than by
-    // anything this tool can ask git for. `crates/exec` covers that case.
     let broken = c.repos.join("r00");
     git(&broken, &["remote", "set-url", "origin", "https://127.0.0.1:1/nope.git"]);
 
@@ -331,20 +288,13 @@ async fn an_unreachable_remote_fails_fast_without_stalling_the_batch() {
     for name in ["r01", "r02", "r03", "r04"] {
         assert_eq!(by_name[name].state, JobState::Ok, "{name} was dragged down");
     }
-    // The whole batch, not just the healthy part.
     assert!(elapsed < Duration::from_secs(10), "the batch took {elapsed:?}");
-    // And the failure is legible rather than an empty transcript.
     assert!(!by_name["r00"].log.is_empty());
     engine.shutdown().await;
 }
 
-// ---- acceptance: per-repository serialization -------------------------
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_that_will_not_finish_is_killed_by_its_deadline() {
-    // The guarantee behind "no hang, ever". Not tested through a slow network,
-    // whose timing is not ours to control, but through a command that simply
-    // never returns — which is the same thing from the engine's side.
     let tmp = tempfile::tempdir().unwrap();
     let c = clones(tmp.path(), 2);
     let engine = Engine::start(Config {
@@ -359,7 +309,6 @@ async fn a_job_that_will_not_finish_is_killed_by_its_deadline() {
     let h = engine.handle();
     let snaps = h.scan_to_completion(vec![c.repos.clone()], false).await.unwrap().snapshots;
 
-    // A network action, so it takes the network deadline.
     let stall = Action::Custom {
         args: vec!["-c".into(), "alias.stall=!sh -c 'sleep 30'".into(), "stall".into()],
         network: true,
@@ -383,17 +332,13 @@ async fn a_job_that_will_not_finish_is_killed_by_its_deadline() {
         "{:?}",
         jobs.iter().map(|j| &j.state).collect::<Vec<_>>()
     );
-    // The deadline plus the two-second grace, not the child's thirty seconds.
     assert!(elapsed < Duration::from_secs(6), "took {elapsed:?}");
-    // And the transcript says why, rather than just ending.
     assert!(jobs[0].log.iter().any(|l| l.text.contains("timed out")), "{:?}", jobs[0].log);
     engine.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn two_jobs_for_one_repository_never_run_at_once() {
-    // Instrumented from the event stream, which is the engine's own account of
-    // what it did — not from the scheduler's internals.
     let tmp = tempfile::tempdir().unwrap();
     let c = clones(tmp.path(), 2);
 
@@ -437,13 +382,8 @@ async fn two_jobs_for_one_repository_never_run_at_once() {
     engine.shutdown().await;
 }
 
-// ---- acceptance: cancellation -----------------------------------------
-
 #[tokio::test(flavor = "multi_thread")]
 async fn cancelling_a_batch_leaves_no_orphaned_processes() {
-    // A custom action whose git alias spawns a shell that ignores SIGTERM and
-    // announces survival by creating a file. Driven through the engine, so the
-    // batch's cancellation token is what reaches the process group.
     let tmp = tempfile::tempdir().unwrap();
     let c = clones(tmp.path(), 3);
     let marker_dir = c.dir.join("markers");
@@ -497,7 +437,6 @@ async fn cancelling_a_batch_leaves_no_orphaned_processes() {
 
     let mut events = h.subscribe();
     let batch = h.start_batch(p, JobOrigin::User).await.unwrap();
-    // Wait until they are actually running, so cancellation has something to kill.
     let mut running = 0;
     while running < 3 {
         if let Ok(Event::JobStateChanged { state: JobState::Running, .. }) = events.recv().await {
@@ -519,7 +458,6 @@ async fn cancelling_a_batch_leaves_no_orphaned_processes() {
         jobs.iter().map(|j| &j.state).collect::<Vec<_>>()
     );
 
-    // Past when the scripts would have finished sleeping.
     tokio::time::sleep(Duration::from_secs(6)).await;
     let survivors: Vec<_> = std::fs::read_dir(&marker_dir)
         .unwrap()
@@ -534,7 +472,6 @@ async fn cancelling_a_batch_leaves_no_orphaned_processes() {
 async fn cancelling_marks_queued_jobs_cancelled_without_running_them() {
     let tmp = tempfile::tempdir().unwrap();
     let c = clones(tmp.path(), 6);
-    // One network slot, so most of the batch is still queued when it is killed.
     let engine = Engine::start(Config {
         limits: Limits { network: 1, per_host: 1, ..Default::default() },
         ..config()
@@ -545,7 +482,6 @@ async fn cancelling_marks_queued_jobs_cancelled_without_running_them() {
     let mut events = h.subscribe();
     let p = h.plan(Action::Fetch { prune: false, tags: false }, Selection::All).await.unwrap();
     let batch = h.start_batch(p, JobOrigin::User).await.unwrap();
-    // As soon as anything is running, kill it.
     loop {
         if let Ok(Event::JobStateChanged { state: JobState::Running, .. }) = events.recv().await {
             break;
@@ -564,28 +500,15 @@ async fn cancelling_marks_queued_jobs_cancelled_without_running_them() {
     assert_eq!(jobs.len(), 6);
     let cancelled = jobs.iter().filter(|j| j.state == JobState::Cancelled).count();
     assert!(cancelled >= 5, "expected most of the batch cancelled, got {cancelled}");
-    // Nothing is left in limbo: every job reached a terminal state.
     assert!(jobs.iter().all(|j| j.state.is_terminal()), "a job was left queued or running");
     engine.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cancelling_a_queued_job_does_not_free_a_repository_another_job_holds() {
-    // One job per repository, ever — across *batches*, which is where it is
-    // easiest to lose. A job cancelled out of the queue never took the
-    // repository's busy marker, so settling it must not hand one back: the
-    // marker belongs to whichever job is actually running there, and two `git`
-    // processes in one repository contend for `index.lock` and fail in ways
-    // that look like bugs.
-    //
-    // Two batches over one repository is the ordinary way to reach this, and
-    // the fetch scheduler reaches it on a timer.
     let tmp = tempfile::tempdir().unwrap();
     let c = clones(tmp.path(), 1);
     let engine = Engine::start(Config {
-        // Generous on purpose: the *only* thing that may hold a job back here is
-        // its repository being busy, so a permit shortage cannot make the test
-        // pass for the wrong reason.
         limits: Limits { network: 8, per_host: 8, local: 8, ..Default::default() },
         ..config()
     });
@@ -593,9 +516,6 @@ async fn cancelling_a_queued_job_does_not_free_a_repository_another_job_holds() 
     let snaps = h.scan_to_completion(vec![c.repos.clone()], false).await.unwrap().snapshots;
     let repo = snaps[0].id.clone();
 
-    // Long enough to still be running when the other two batches arrive, and
-    // well inside the 60 s network deadline so it ends by exiting rather than
-    // by being killed.
     let stall = Action::Custom {
         args: vec!["-c".into(), "alias.stall=!sh -c 'sleep 4'".into(), "stall".into()],
         network: true,
@@ -616,8 +536,6 @@ async fn cancelling_a_queued_job_does_not_free_a_repository_another_job_holds() 
 
     let mut events = h.subscribe();
     let holder = h.start_batch(against(&stall), JobOrigin::User).await.unwrap();
-    // Wait for it to be *running*, not merely queued: the busy marker is set as
-    // a job launches, so until then there is nothing to release by mistake.
     loop {
         if let Ok(Event::JobStateChanged { batch, state: JobState::Running, .. }) =
             events.recv().await
@@ -628,13 +546,9 @@ async fn cancelling_a_queued_job_does_not_free_a_repository_another_job_holds() 
         }
     }
 
-    // Queued behind the holder — in the repository's own queue, because the
-    // repository is busy — and then cancelled from there.
     let cancelled = h.start_batch(against(&quick), JobOrigin::User).await.unwrap();
     h.cancel_batch(cancelled).await.unwrap();
 
-    // The third batch must wait for the holder. Before the fix it launched
-    // immediately, because cancelling the second one had cleared the marker.
     let waiter = h.start_batch(against(&quick), JobOrigin::User).await.unwrap();
 
     let mut holder_done = false;
@@ -655,12 +569,8 @@ async fn cancelling_a_queued_job_does_not_free_a_repository_another_job_holds() 
     engine.shutdown().await;
 }
 
-// ---- re-probe suppression --------------------------------------------
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_completed_job_causes_exactly_one_reprobe() {
-    // Without this the watcher turns every pull into a probe storm. Counted
-    // through a wrapping Probe, the engine's only I/O seam.
     use git_scylla_probe::{
         BoxFuture, GitCliProbe, Probe, ProbeRequest, RefAnswer, RefError, RefQuery, RefRequest,
     };
@@ -679,8 +589,6 @@ async fn a_completed_job_causes_exactly_one_reprobe() {
             self.inner.probe(req)
         }
 
-        /// Uncounted: this test counts probes per repository, and a ref read is
-        /// not one.
         fn refs<'a>(
             &'a self,
             repos: Vec<RefRequest>,
@@ -710,7 +618,6 @@ async fn a_completed_job_causes_exactly_one_reprobe() {
     let jobs = run(&h, p).await;
     assert!(jobs.iter().all(|j| j.state == JobState::Ok));
 
-    // Give any stray extra probe a chance to land before asserting.
     tokio::time::sleep(Duration::from_millis(300)).await;
     let per_repo = counts.lock().unwrap().clone();
     for (path, n) in &per_repo {
@@ -720,12 +627,8 @@ async fn a_completed_job_causes_exactly_one_reprobe() {
     engine.shutdown().await;
 }
 
-// ---- the global cap --------------------------------------------------
-
 #[tokio::test(flavor = "multi_thread")]
 async fn the_network_cap_bounds_concurrent_children() {
-    // The engine's version of the scheduler's unit test: 20 jobs, cap of 4,
-    // observed through the state events rather than through internals.
     let tmp = tempfile::tempdir().unwrap();
     let c = clones(tmp.path(), 20);
     let engine = Engine::start(Config {
@@ -764,7 +667,6 @@ async fn a_plan_with_nothing_eligible_finishes_immediately() {
     let h = engine.handle();
     h.scan_to_completion(vec![c.repos.clone()], false).await.unwrap();
 
-    // Nothing is behind, so an ff-only pull has nothing to do.
     let p = h.plan(Action::Pull { mode: PullMode::FfOnly }, Selection::All).await.unwrap();
     assert!(p.is_empty());
     let jobs = run(&h, p).await;
@@ -783,8 +685,6 @@ async fn a_cancelled_scan_stops_and_still_reports_done() {
     let mut events = h.subscribe();
     let id = h.start_scan(vec![c.repos.clone()], false).await.unwrap();
     h.cancel_scan(id).await.unwrap();
-    // Whatever it managed to find, it must still settle rather than leaving the
-    // caller waiting forever.
     loop {
         match events.recv().await.unwrap() {
             Event::ScanDone { scan, .. } if scan == id => break,
@@ -794,14 +694,8 @@ async fn a_cancelled_scan_stops_and_still_reports_done() {
     engine.shutdown().await;
 }
 
-// ---- scan bookkeeping --------------------------------------------------
-
 #[tokio::test(flavor = "multi_thread")]
 async fn two_concurrent_scans_keep_separate_accounts() {
-    // The counters used to be shared: every discovery incremented every scan,
-    // so two scans each counted the other's work and `ScanDone` fired on the
-    // wrong arithmetic. There are two scans the moment the user adds a root
-    // while one is running, or presses Refresh.
     let tmp = tempfile::tempdir().unwrap();
     let a = clones(&tmp.path().join("a"), 4);
     let b = clones(&tmp.path().join("b"), 7);
@@ -831,7 +725,6 @@ async fn two_concurrent_scans_keep_separate_accounts() {
         }
     }
     assert!(done.contains(&id_a) && done.contains(&id_b));
-    // Each scan counted only its own root.
     assert_eq!(peak[&id_a], (4, 4), "scan a");
     assert_eq!(peak[&id_b], (7, 7), "scan b");
 
@@ -841,9 +734,6 @@ async fn two_concurrent_scans_keep_separate_accounts() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_scan_alongside_a_batch_settles_on_its_own_repositories() {
-    // The re-probes a batch produces used to increment every in-flight scan's
-    // `probed`, so a scan could satisfy its own completion test before its
-    // repositories had been read — reporting done with rows still missing.
     let tmp = tempfile::tempdir().unwrap();
     let running = clones(&tmp.path().join("running"), 6);
     let fresh = clones(&tmp.path().join("fresh"), 6);
@@ -852,7 +742,6 @@ async fn a_scan_alongside_a_batch_settles_on_its_own_repositories() {
     let h = engine.handle();
     h.scan_to_completion(vec![running.repos.clone()], false).await.unwrap();
 
-    // Start a batch, then scan a *different* root while it runs.
     let p = h.plan(Action::Fetch { prune: false, tags: false }, Selection::All).await.unwrap();
     assert_eq!(p.eligible.len(), 6);
     let mut events = h.subscribe();
@@ -875,8 +764,6 @@ async fn a_scan_alongside_a_batch_settles_on_its_own_repositories() {
     }
     assert!(scan_done_at.is_some());
 
-    // The real property: when the scan said it was done, every repository under
-    // its root actually had a snapshot.
     let snaps = h.snapshot().await.unwrap();
     for i in 0..6 {
         let want = fresh.repos.join(format!("r{i:02}"));
@@ -887,14 +774,6 @@ async fn a_scan_alongside_a_batch_settles_on_its_own_repositories() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_scan_settles_even_when_discovered_paths_vanish_underneath_it() {
-    // `Internal::Found` used to count a repository before canonicalizing its
-    // path. A path that disappeared in between — a build directory being cleaned
-    // mid-scan — left the scan permanently one short, so `ScanDone` never fired
-    // and `shutdown()` never returned.
-    //
-    // The trigger is a race, so this deletes aggressively during the walk and
-    // asserts the scan settles regardless of whether it lands. It cannot fail
-    // spuriously: settling is required either way.
     let tmp = tempfile::tempdir().unwrap();
     let c = clones(tmp.path(), 30);
 
@@ -923,15 +802,12 @@ async fn a_scan_settles_even_when_discovered_paths_vanish_underneath_it() {
     })
     .await;
     assert!(settled.is_ok(), "the scan never settled");
-
-    // And shutdown returns, which is the consequence that actually bit.
     let stopped = tokio::time::timeout(Duration::from_secs(30), engine.shutdown()).await;
     assert!(stopped.is_ok(), "shutdown hung");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn refresh_repo_re_reads_one_repository() {
-    // What the Refresh control calls.
     let tmp = tempfile::tempdir().unwrap();
     let c = clones(tmp.path(), 3);
     advance(&c);
@@ -941,7 +817,6 @@ async fn refresh_repo_re_reads_one_repository() {
     let snaps = h.scan_to_completion(vec![c.repos.clone()], false).await.unwrap().snapshots;
     assert!(snaps.iter().all(|s| s.upstream.as_ref().and_then(|u| u.behind()) == Some(0)));
 
-    // Fetch behind the engine's back, so only a refresh can notice.
     let target = c.repos.join("r00");
     git(&target, &["fetch"]);
     let id = snaps.iter().find(|s| s.path == target).unwrap().id.clone();
@@ -954,7 +829,6 @@ async fn refresh_repo_re_reads_one_repository() {
     .await;
     assert!(updated, "refresh_repo did not re-read the repository");
 
-    // ...and only that one.
     let others = h.snapshot().await.unwrap();
     for s in others.iter().filter(|s| s.id != id) {
         assert_eq!(s.upstream.as_ref().and_then(|u| u.behind()), Some(0), "{}", s.path.display());
@@ -969,7 +843,6 @@ async fn refreshing_a_repository_the_engine_does_not_know_is_a_no_op() {
     let engine = Engine::start(config());
     let h = engine.handle();
     h.scan_to_completion(vec![c.repos.clone()], false).await.unwrap();
-    // Must not hang, panic, or leave the engine un-idle.
     h.refresh_repo(git_scylla_core::RepoId::from_canonical("/nope/nope")).await.unwrap();
     let stopped = tokio::time::timeout(Duration::from_secs(10), engine.shutdown()).await;
     assert!(stopped.is_ok(), "an unknown refresh left the engine busy");
@@ -977,10 +850,6 @@ async fn refreshing_a_repository_the_engine_does_not_know_is_a_no_op() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unreadable_directory_is_reported_rather_than_looking_like_an_empty_root() {
-    // The signal the Full Disk Access hint is built on. An unsigned build
-    // scanning a protected directory finds nothing, and that
-    // is indistinguishable from an empty working set unless the walk says what
-    // it could not read.
     use std::os::unix::fs::PermissionsExt;
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().canonicalize().unwrap();
@@ -1008,8 +877,6 @@ async fn an_unreadable_directory_is_reported_rather_than_looking_like_an_empty_r
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_genuinely_empty_root_reports_no_errors() {
-    // The other half: nothing found under a readable, empty directory is not a
-    // problem, and dressing it up as one would make the hint noise.
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().canonicalize().unwrap();
     let root = dir.join("empty");
@@ -1024,22 +891,12 @@ async fn a_genuinely_empty_root_reports_no_errors() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_event_stream_alone_is_enough_to_build_the_drawer() {
-    // Stated as a property: a consumer that subscribes and then never asks the
-    // engine another question must still be able to show every repository in
-    // the batch, attribute it, and watch it move.
-    //
-    // Two things make that true and both are easy to lose. Queued jobs announce
-    // themselves, so the drawer starts full rather than filling in as the
-    // scheduler lets work through. And every job event carries its batch, so the
-    // events emitted *during* `start_batch` — before it has returned an id to
-    // attribute them to — are not homeless.
     let tmp = tempfile::tempdir().unwrap();
     let c = clones(tmp.path(), 3);
     advance(&c);
     for name in ["r00", "r01", "r02"] {
         git(&c.repos.join(name), &["fetch"]);
     }
-    // One repository cannot be pulled, so the batch carries both shapes.
     std::fs::write(c.repos.join("r00/a.txt"), "changed\n").unwrap();
 
     let engine = Engine::start(config());
@@ -1051,8 +908,6 @@ async fn the_event_stream_alone_is_enough_to_build_the_drawer() {
     assert_eq!(p.eligible.len(), 2, "two behind and clean");
     assert_eq!(p.skipped.len(), 1, "one dirty");
 
-    // Deliberately started *without* reading the returned id first: everything
-    // below is reconstructed from events only.
     let started = h.start_batch(p, JobOrigin::User).await.unwrap();
 
     let mut rows: HashMap<git_scylla_core::JobId, (RepoId, JobState)> = HashMap::new();
@@ -1077,15 +932,12 @@ async fn the_event_stream_alone_is_enough_to_build_the_drawer() {
             _ => {}
         }
     }
-
-    // Every repository has a row, from events alone.
     assert_eq!(rows.len(), 3);
     let repos: HashSet<&RepoId> = rows.values().map(|(r, _)| r).collect();
     assert_eq!(repos.len(), 3, "one row per repository, not per state change");
     assert_eq!(batches, HashSet::from([started]), "every row attributed to the batch");
     assert_eq!(seen_queued, 2, "the two eligible jobs announced themselves before running");
 
-    // ...and the rows agree with the summary the banner is drawn from.
     let s = summary;
     assert_eq!(s.ok, 2);
     assert_eq!(s.skipped, 1);

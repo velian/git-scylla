@@ -3,18 +3,13 @@
 //! The cross product of every `Action` variant against every fixture snapshot.
 //! This table *is* the specification of the tool's safety.
 //!
-//! So it is checked in as a table and not as assertions. A change to any rule
-//! shows up as a diff a reviewer reads line by line, which is the point — the
-//! danger with preconditions is not that one is wrong in isolation but that a
-//! fix for one repository state quietly changes the answer for six others.
-//!
 //! Regenerate with `UPDATE_ELIGIBILITY_TABLE=1 cargo test -p git-scylla-engine`
 //! and **read the diff**.
 
 use git_scylla_core::SkipReason;
-use git_scylla_core::{Action, PullMode, RepoSnapshot};
+use git_scylla_core::{Action, PullMode, RepoSnapshot, SyncPlan};
 use git_scylla_discovery::{WalkOptions, Walker};
-use git_scylla_engine::{evaluate, Eligibility, Policy};
+use git_scylla_engine::{evaluate, sync_default_resolved, Eligibility, Policy};
 use git_scylla_probe::{GitCliProbe, Probe, ProbeRequest};
 use git_scylla_testkit::FixtureSet;
 use std::collections::BTreeMap;
@@ -22,7 +17,6 @@ use std::time::{Duration, Instant, SystemTime};
 
 const GOLDEN: &str = include_str!("eligibility_table.txt");
 
-/// The columns, in order. Each is one concrete `Action`.
 fn columns() -> Vec<(&'static str, Action)> {
     vec![
         ("fetch", Action::Fetch { prune: true, tags: false }),
@@ -40,12 +34,7 @@ fn columns() -> Vec<(&'static str, Action)> {
         ("stash-u", Action::Stash { include_untracked: true }),
         ("pop", Action::StashPop),
         ("custom", Action::Custom { args: vec!["gc".into()], network: true, mutating: true }),
-        // The template, `plan: None` — which is what `evaluate` sees, because
-        // the engine resolves the branch only after the preconditions have
-        // already narrowed the set.
         ("sync", Action::SyncDefault { mode: PullMode::FfOnly, plan: None }),
-        // The template again: the name is derived after the preconditions have
-        // narrowed the set, so this is the shape `evaluate` actually sees.
         (
             "devtag",
             Action::DevTag {
@@ -55,9 +44,28 @@ fn columns() -> Vec<(&'static str, Action)> {
                 push: Some("origin".into()),
             },
         ),
-        // Undo's repair step. The commit is a stand-in — what the table is
-        // asserting is which *repository states* admit a reset at all, and the
-        // fixtures never point HEAD at this one.
+        (
+            "sync-on-trunk",
+            Action::SyncDefault {
+                mode: PullMode::FfOnly,
+                plan: Some(SyncPlan {
+                    default: "main".into(),
+                    back_to: "main".into(),
+                    stash: false,
+                }),
+            },
+        ),
+        (
+            "sync-off-trunk",
+            Action::SyncDefault {
+                mode: PullMode::FfOnly,
+                plan: Some(SyncPlan {
+                    default: "main".into(),
+                    back_to: "wip".into(),
+                    stash: false,
+                }),
+            },
+        ),
         (
             "undo",
             Action::Reset {
@@ -68,8 +76,16 @@ fn columns() -> Vec<(&'static str, Action)> {
     ]
 }
 
-/// Short, greppable codes. Deliberately terse so the table stays readable at a
-/// glance; the long form is `SkipReason`'s `Display`.
+fn verdict(action: &Action, snap: &RepoSnapshot, now: SystemTime, policy: &Policy) -> Eligibility {
+    let first = evaluate(action, snap, now, policy);
+    match (&first, action) {
+        (Eligibility::Eligible, Action::SyncDefault { plan: Some(p), .. }) => {
+            sync_default_resolved(snap, p)
+        }
+        _ => first,
+    }
+}
+
 fn code(e: &Eligibility) -> String {
     match e {
         Eligibility::Eligible => "ok".into(),
@@ -117,9 +133,6 @@ async fn probe_fixtures(scan_root: &std::path::Path) -> BTreeMap<String, RepoSna
 
 fn render(snapshots: &BTreeMap<String, RepoSnapshot>) -> String {
     let cols = columns();
-    // Staleness is a clock rule and has its own unit tests; holding it out here
-    // keeps the table about the *action* rules rather than about how long the
-    // fixture build took.
     let policy = Policy { max_snapshot_age: Duration::from_secs(86_400), ..Default::default() };
     let now = SystemTime::now();
 
@@ -153,7 +166,7 @@ fn render(snapshots: &BTreeMap<String, RepoSnapshot>) -> String {
         for (i, (_, action)) in cols.iter().enumerate() {
             out.push_str(&format!(
                 "  {:w$}",
-                code(&evaluate(action, snap, now, &policy)),
+                code(&verdict(action, snap, now, &policy)),
                 w = widths[i]
             ));
         }
@@ -197,9 +210,6 @@ async fn the_eligibility_table_matches_the_checked_in_specification() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn no_fixture_is_eligible_for_an_action_that_would_obviously_destroy_work() {
-    // A blunt backstop under the table above, phrased as invariants rather than
-    // as cells so that it survives the table being regenerated. If someone
-    // accepts a bad diff, these still fail.
     let tmp = tempfile::tempdir().unwrap();
     let set = FixtureSet::build(tmp.path()).expect("fixtures");
     let snapshots = probe_fixtures(&set.scan_root).await;
@@ -208,7 +218,7 @@ async fn no_fixture_is_eligible_for_an_action_that_would_obviously_destroy_work(
 
     for (name, snap) in &snapshots {
         for (label, action) in columns() {
-            let eligible = evaluate(&action, snap, now, &policy).is_eligible();
+            let eligible = verdict(&action, snap, now, &policy).is_eligible();
             if !eligible {
                 continue;
             }
@@ -221,15 +231,12 @@ async fn no_fixture_is_eligible_for_an_action_that_would_obviously_destroy_work(
                 ),
                 _ => {}
             }
-            // Nothing but fetch may run mid-operation. Custom is blocked too,
-            // by the universal rules, so fetch is alone here.
             if let Some(op) = snap.op {
                 assert!(
                     matches!(action, Action::Fetch { .. }),
                     "{label} is eligible for {name}, which is mid-{op}"
                 );
             }
-            // Nothing that needs a worktree may run without one.
             if !snap.kind.has_worktree() {
                 assert!(
                     matches!(action, Action::Fetch { .. } | Action::Custom { .. }),

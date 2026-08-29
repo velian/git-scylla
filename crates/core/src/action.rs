@@ -2,7 +2,6 @@ use crate::Oid;
 use serde::{Deserialize, Serialize};
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-/// What to do to a repository.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
 pub enum Action {
@@ -14,8 +13,6 @@ pub enum Action {
         mode: PullMode,
     },
     Push {
-        /// `Some(remote)` sets the upstream to that remote, for a branch that
-        /// has none. `None` pushes to the configured upstream.
         set_upstream: Option<String>,
         force_with_lease: bool,
     },
@@ -24,79 +21,51 @@ pub enum Action {
         create: bool,
     },
     Commit {
-        /// The template before the planner resolves it, the rendered message
-        /// afterwards.
         message: String,
         stage_all: bool,
-        /// Skip the repository's own hooks.
         no_verify: bool,
     },
     Stash {
         include_untracked: bool,
     },
     StashPop,
-    /// Create a branch, without switching to it.
     Branch {
         name: String,
-        /// Where to start it. `None` is the current `HEAD`.
         from: Option<String>,
     },
-    /// Move `HEAD` back to a commit. The repair half of undo.
     Reset {
         to: Oid,
         mode: ResetMode,
     },
-    /// Bring this repository's default branch up to date, and put the user
-    /// back where they were.
     SyncDefault {
         mode: PullMode,
-        /// `None` in a template, `Some` once resolved for one repository.
         plan: Option<SyncPlan>,
     },
-    /// Cut the next tag in a pre-release series, and publish it.
     DevTag {
-        /// The series: `dev`, `rc`, whatever the team writes.
         channel: String,
-        /// Where a *new* series starts, from the newest release.
         bump: crate::version::Bump,
-        /// `None` in a template, `Some` once derived for one repository.
         name: Option<String>,
-        /// Publish to this remote. `None` creates it locally only.
         push: Option<String>,
     },
-    /// An argv vector, never a shell string.
     Custom {
         args: Vec<String>,
-        /// Does this reach the network, and so take the network semaphore?
-        /// Defaults to `true` when unstated.
         network: bool,
-        /// Can it move `HEAD` or create local history? Defaults to `true`
-        /// when unstated.
         mutating: bool,
     },
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-/// One repository's answer to "sync the default branch".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncPlan {
-    /// This repository's own default branch — `main` here, `master` there.
     pub default: String,
-    /// The branch to come back to, by name — never `-`.
     pub back_to: String,
-    /// Stash first, when there is tracked work in the way of the switch.
     pub stash: bool,
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-/// How far back a reset takes the working tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResetMode {
-    /// Moves `HEAD` and leaves the index and working tree alone, so the
-    /// undone commit's contents come back staged.
     Soft,
-    /// Moves `HEAD`, the index, and the working tree. **Discards uncommitted
-    /// work.**
     Hard,
 }
 
@@ -118,21 +87,13 @@ impl std::fmt::Display for ResetMode {
     }
 }
 
-/// Can this action be undone, and how?
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Undoable {
-    /// Reset to the recorded `head_before`, in this mode.
     Reset(ResetMode),
-    /// Return to the branch that was checked out before.
-    ///
-    /// A checkout can't be undone by resetting: on a branch, `reset --hard`
-    /// moves that branch's pointer, not just `HEAD`.
     Switch,
-    /// No, and why — in words a plan can show as a skip reason.
     No(&'static str),
 }
 
-/// Whether an action's effect can be repaired by moving `HEAD` back.
 pub fn undoability(action: &Action) -> Undoable {
     match action {
         Action::Commit { .. } => Undoable::Reset(ResetMode::Soft),
@@ -157,7 +118,6 @@ pub fn undoability(action: &Action) -> Undoable {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PullMode {
-    /// Refuse anything that is not a fast-forward.
     FfOnly,
     Rebase,
     Merge,
@@ -168,8 +128,6 @@ impl PullMode {
         match self {
             PullMode::FfOnly => "--ff-only",
             PullMode::Rebase => "--rebase",
-            // Explicit, not bare `pull` — otherwise `pull.rebase` config
-            // decides the behavior.
             PullMode::Merge => "--no-rebase",
         }
     }
@@ -186,10 +144,6 @@ impl std::fmt::Display for PullMode {
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-/// One `git` invocation, with the command that closes what it opened.
-///
-/// `compensate` runs after the forward pass, in reverse order, whether the
-/// job succeeded or failed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
     pub argv: Vec<String>,
@@ -207,39 +161,30 @@ impl Step {
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-/// Which pass a [`StepRun`] belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Pass {
     Forward,
-    /// A compensating command, run after the forward pass to close what a
-    /// step opened.
     Cleanup,
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-/// What happened to one step.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
 pub enum StepState {
     Pending,
     Running,
     Ok,
-    Failed {
-        code: i32,
-    },
+    Failed { code: i32 },
     Cancelled,
-    /// An earlier step failed, so this one never started.
     NotRun,
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-/// One executed step, and where its output sits in the job's transcript.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepRun {
     pub step: Step,
     pub pass: Pass,
     pub state: StepState,
-    /// A range into [`crate::Job::log`].
     pub log: std::ops::Range<usize>,
 }
 
@@ -249,21 +194,16 @@ impl StepRun {
     }
 }
 
-/// The argv for a pull, in whatever mode.
 fn pull_argv(mode: PullMode) -> Vec<String> {
     let mut argv = vec!["pull".to_string(), mode.flag().to_string()];
-    // `--no-autostash` stops the user's `rebase.autoStash` config from
-    // silently stashing their work.
     argv.push("--no-autostash".into());
     if matches!(mode, PullMode::Merge) {
-        // Makes the merge non-interactive without relying on `$GIT_EDITOR`.
         argv.push("--no-edit".into());
     }
     argv
 }
 
 impl Action {
-    /// The commands this action runs, in order.
     pub fn steps(&self) -> Vec<Step> {
         match self {
             Action::Fetch { prune, tags } => {
@@ -287,7 +227,6 @@ impl Action {
                 if let Some(remote) = set_upstream {
                     argv.push("--set-upstream".into());
                     argv.push(remote.clone());
-                    // `HEAD` resolves to the current branch name.
                     argv.push("HEAD".into());
                 }
                 vec![Step::simple(argv)]
@@ -311,13 +250,10 @@ impl Action {
                 if !*stage_all {
                     return vec![commit];
                 }
-                // `git commit -a` stages tracked modifications only, not
-                // untracked files.
                 vec![Step::simple(vec!["add".into(), "-A".into()]), commit]
             }
 
             Action::Stash { include_untracked } => {
-                // `stash push`, not bare `stash` — the bare form is deprecated.
                 let mut argv = vec!["stash".to_string(), "push".into()];
                 if *include_untracked {
                     argv.push("--include-untracked".into());
@@ -363,8 +299,6 @@ impl Action {
             Action::DevTag { name: Some(name), push, .. } => {
                 let create = Step::simple(vec!["tag".into(), name.clone()]);
                 let Some(remote) = push else { return vec![create] };
-                // Published first, tag created locally second — a rejected
-                // push then changes nothing locally.
                 vec![
                     Step::simple(vec![
                         "push".into(),
@@ -379,8 +313,23 @@ impl Action {
         }
     }
 
-    /// Does this action reach the network, and so take the network semaphore
-    /// rather than the local one?
+    pub fn is_resolved(&self) -> bool {
+        match self {
+            Action::SyncDefault { plan, .. } => plan.is_some(),
+            Action::DevTag { name, .. } => name.is_some(),
+            Action::Fetch { .. }
+            | Action::Pull { .. }
+            | Action::Push { .. }
+            | Action::Checkout { .. }
+            | Action::Commit { .. }
+            | Action::Stash { .. }
+            | Action::StashPop
+            | Action::Branch { .. }
+            | Action::Reset { .. }
+            | Action::Custom { .. } => true,
+        }
+    }
+
     pub fn is_network(&self) -> bool {
         match self {
             Action::Fetch { .. }
@@ -398,7 +347,6 @@ impl Action {
         }
     }
 
-    /// Can this action move `HEAD` or change local history?
     pub fn is_mutating(&self) -> bool {
         match self {
             // Fetch only advances `refs/remotes/**`.
@@ -417,7 +365,6 @@ impl Action {
         }
     }
 
-    /// Short label for a plan header or an action bar.
     pub fn label(&self) -> String {
         match self {
             Action::Fetch { .. } => "Fetch".into(),
@@ -440,7 +387,6 @@ impl Action {
 }
 
 impl std::fmt::Display for Action {
-    /// The exact command line, for a plan sheet and a transcript header.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let steps = self.steps();
         let rendered: Vec<String> =
@@ -759,6 +705,28 @@ mod tests {
         let custom = Action::Custom { args: vec!["gc".into()], network: true, mutating: true };
         assert!(custom.is_network());
         assert!(custom.is_mutating());
+    }
+
+    #[test]
+    fn resolved_and_runnable_mean_the_same_thing() {
+        for action in all_actions() {
+            assert!(action.is_resolved(), "all_actions carries only runnable shapes: {action:?}");
+            assert!(!action.steps().is_empty(), "a resolved action expands to steps: {action:?}");
+        }
+
+        let templates = [
+            Action::SyncDefault { mode: PullMode::FfOnly, plan: None },
+            Action::DevTag {
+                channel: "dev".into(),
+                bump: crate::version::Bump::Minor,
+                name: None,
+                push: Some("origin".into()),
+            },
+        ];
+        for action in templates {
+            assert!(!action.is_resolved(), "{action:?}");
+            assert!(action.steps().is_empty(), "a template must expand to nothing: {action:?}");
+        }
     }
 
     #[test]

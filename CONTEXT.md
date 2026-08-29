@@ -17,6 +17,11 @@ The distinction matters because a template is not runnable. A plan that showed
 one is claiming a uniformity the working set does not have — "create the next
 dev tag" is not something a user can check before confirming it forty times.
 
+A **plan template** is the same idea one level up: a plan whose per-repository
+actions may still be templates. It is a separate type from a `Plan`, so a plan
+that has not been through resolving cannot be handed to anything that runs
+one.
+
 ## Resolving
 
 Turning an action template into one runnable action **per repository**, using
@@ -35,6 +40,18 @@ repository has to be refused — there is no action to run. An unvalidatable one
 is often better let through: refusing a checkout that would have worked is worse
 than a job that fails with a good message, so an unanswerable question means
 *try*, not *skip*.
+
+## Gating
+
+Deciding whether an action can run here, against facts the *engine* derived
+rather than facts the user typed. Sync's "you are already on the default branch
+and your tree is dirty" is one: nothing was mis-specified, and no answer is
+missing — this repository is simply in a state the action refuses.
+
+A third thing because the remedy is a third thing. An unresolvable repository
+needs a repository that can answer; an unvalidatable one needs the user to type
+something else; a gated one needs the repository changed. Gating runs after
+resolving, since the facts it judges are the ones resolving produced.
 
 ## Hot and cold facts
 

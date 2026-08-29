@@ -51,6 +51,11 @@ The actor loop itself never blocks. Anything that touches disk or a
 subprocess runs on a separate task and reports back through one internal
 `mpsc` channel, which the actor loop drains alongside `Cmd`.
 
+`Actor::on_cmd` is a synchronous function, and that is how the claim is kept
+rather than merely stated: a command either answers from state the actor
+already holds or spawns a task. Adding an `await` to it means making it
+`async` again, which is the moment to spawn instead.
+
 ```mermaid
 flowchart LR
     subgraph actor["actor task (single, owns all state)"]
@@ -93,7 +98,7 @@ subprocess wrapper, used by `runner`.
 | Module | Role |
 |---|---|
 | [`engine`](../src/engine.rs) | The actor: `Cmd` in, `Event` out, owns all mutable state |
-| [`plan`](../src/plan.rs) | Turns an `Action` template, a `Selection`, and a set of snapshots into a `Plan`; also `undo` |
+| [`plan`](../src/plan.rs) | Turns an `Action` template, a `Selection`, and a set of snapshots into a `PlanTemplate`; `resolve` finishes one into a `Plan`; also `undo` |
 | [`policy`](../src/policy.rs) | Pure eligibility rules and fetch backoff/quarantine — no I/O, no clock |
 | [`sched`](../src/sched.rs) | Admits queued jobs under global, per-host, and per-repo concurrency limits |
 | [`probe_traffic`](../src/probe_traffic.rs) | Decides which repositories are owed a probe, and debounces watcher-triggered ones |
@@ -134,11 +139,31 @@ are blocked by a stale snapshot, a bare repository, an operation already in
 progress, a detached HEAD, or a dirty worktree; `Fetch` is exempt from all
 but the first two, since it never touches the worktree.
 
-`resolve` fills in what a snapshot alone cannot answer for some actions: a
-push remote, a commit message template, a branch name. Three questions need
-more than a snapshot and are answered by the actor before planning finishes —
-whether a ref exists, a repository's default branch, and the next dev tag
-name — each read from the filesystem once per plan, not once per row.
+Planning is two steps, and only the gap between them touches disk.
+
+`plan` decides everything a snapshot can decide, filling in a push remote, a
+commit message template, a branch name. What it cannot answer it leaves alone
+and returns a `PlanTemplate`, which is a separate type precisely so a plan
+still full of templates cannot be mistaken for one that runs.
+
+`resolve` finishes the job, given the answers as an argument. Three questions
+need more than a snapshot — whether a ref exists, a repository's default
+branch, and the next dev tag name — and the actor's only remaining part in
+planning is to ask them: `queries_for` says what to ask and of whom, one
+`Probe::refs` call per distinct question, read once per plan rather than once
+per row.
+
+The asking happens on a spawned task. `ref_requests` builds the requests from
+actor state synchronously — the only half that touches the actor's maps — and
+everything after that is self-contained, so the reads, the resolution and the
+reply all happen off the actor task. A plan that takes a second to resolve
+costs the engine no responsiveness at all. A row whose question went unanswered is skipped as `SnapshotStale`;
+a row that needed no cold fact never consults the answers at all.
+
+The grouping follows each row's *own* action, not the template's. `checkout
+main` is one question asked of every repository; `checkout release/{repo}`
+renders differently per repository, and `undo` returns each repository to its
+own branch, so both ask once per distinct ref.
 
 `PlanView` carries only display data: no `Action`, no `SkipReason`. The CLI's
 text renderer and the GUI's plan sheet both consume `PlanView`, so they
