@@ -72,7 +72,11 @@ export const Grid = forwardRef<GridHandle, Props>(function Grid(
         if (sorted.length === 0) return;
         setCursor(sorted[0].id);
         setAnchor(sorted[0].id);
-        container.current?.focus();
+        // preventScroll: the grid is taller than its scroll port, so the
+        // browser's own focus scroll would pin its top to the top of the
+        // content pane and take the filter and action bar with it. The
+        // cursor effect scrolls the landing row into view instead.
+        container.current?.focus({ preventScroll: true });
       },
     }),
     [sorted],
@@ -162,15 +166,13 @@ export const Grid = forwardRef<GridHandle, Props>(function Grid(
       role="grid"
       aria-label="Repositories"
       onKeyDown={onKeyDown}
-      // Only a Tab-focus should default the cursor to the first row; a
-      // pointer focus is about to place it on the row that was clicked.
       onFocus={() => {
         if (fromPointer.current) return;
         if (cursor === null && sorted.length > 0) setCursor(sorted[0].id);
       }}
       onMouseDown={() => {
         fromPointer.current = true;
-        container.current?.focus();
+        container.current?.focus({ preventScroll: true });
         fromPointer.current = false;
       }}
       onClick={() => setMenu(null)}

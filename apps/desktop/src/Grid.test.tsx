@@ -156,6 +156,20 @@ describe("the keyboard cursor", () => {
     expect(scrolled).not.toContain("alpha");
   });
 
+  it("does not let the browser scroll the grid to the top on a click", async () => {
+
+    const user = userEvent.setup();
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    render(<Harness />);
+
+    await user.click(rowFor("charlie"));
+
+    const grid = screen.getByRole("grid");
+    const calls = focus.mock.calls.filter((_, i) => focus.mock.instances[i] === grid);
+    expect(calls.length).toBeGreaterThan(0);
+    for (const [options] of calls) expect(options).toEqual({ preventScroll: true });
+  });
+
   it("still starts at the first row when the grid is reached by Tab", async () => {
     const user = userEvent.setup();
     render(<Harness />);
@@ -177,6 +191,21 @@ describe("handing off from the filter box", () => {
 
     expect(rowFor("alpha").className).toContain("is-cursor");
     expect(document.activeElement?.getAttribute("role")).toEqual("grid");
+  });
+
+  it("leaves the filter box on screen when handing off", async () => {
+    const user = userEvent.setup();
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    render(<FilterAndGrid />);
+
+    await user.click(screen.getByLabelText("filter"));
+    await user.keyboard("{ArrowDown}");
+
+    const grid = screen.getByRole("grid");
+    const calls = focus.mock.calls.filter((_, i) => focus.mock.instances[i] === grid);
+    expect(calls.length).toBeGreaterThan(0);
+    for (const [options] of calls) expect(options).toEqual({ preventScroll: true });
+    expect(scrolled).toEqual(["alpha"]);
   });
 
   it("focuses the first row on Enter", async () => {
