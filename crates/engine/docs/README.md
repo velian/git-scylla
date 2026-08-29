@@ -128,8 +128,12 @@ flowchart LR
     view["Plan::view()"]
     pv["PlanView\n(strings only)"]
 
+    regate["policy::evaluate\nper resolved action"]
+
     action --> filter --> eval
-    eval -->|eligible| elig --> resolve --> plan
+    eval -->|eligible| elig --> resolve --> regate
+    regate -->|eligible| plan
+    regate -->|ineligible| skip
     eval -->|ineligible| skip --> plan
     plan --> view --> pv
 ```
@@ -138,6 +142,15 @@ flowchart LR
 are blocked by a stale snapshot, a bare repository, an operation already in
 progress, a detached HEAD, or a dirty worktree; `Fetch` is exempt from all
 but the first two, since it never touches the worktree.
+
+It runs twice: on the template, so that a repository heading for a skip is
+never asked a ref question, and again on the resolved action, because
+`SyncDefault`'s last rule — already on the trunk, and dirty — needs a trunk
+name only resolving can supply. `PlanTemplate` carries the `now` and `policy`
+of the first pass into the second, so the two judge alike and the second can
+only differ where a resolved fact was missing the first time. Every other
+variant's arm reads the snapshot and fields resolving does not touch, which is
+what makes the repeat free of surprises rather than merely cheap.
 
 Planning is two steps, and only the gap between them touches disk.
 

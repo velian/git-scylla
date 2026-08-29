@@ -669,11 +669,12 @@ impl Actor {
     }
 
     fn plan_undo(&mut self, batch: BatchId) -> PlanTemplate {
+        let now = SystemTime::now();
         let Some(run) = self.batches.get(&batch) else {
-            return crate::plan::no_undo();
+            return crate::plan::no_undo(now, &self.config.policy);
         };
         if run.batch.undoes.is_some() {
-            return crate::plan::no_undo();
+            return crate::plan::no_undo(now, &self.config.policy);
         }
         let jobs: Vec<Job> =
             run.batch.jobs.iter().filter_map(|id| self.jobs.get(id).cloned()).collect();
@@ -681,7 +682,7 @@ impl Actor {
             self.request_probe(&job.repo);
         }
         let snaps = self.sorted_snapshots();
-        crate::plan::undo(&jobs, &snaps, SystemTime::now(), &self.config.policy)
+        crate::plan::undo(&jobs, &snaps, now, &self.config.policy)
     }
 
     fn fetch_due(&mut self) {

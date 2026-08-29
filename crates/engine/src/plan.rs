@@ -48,11 +48,15 @@ impl<'de> Deserialize<'de> for Plan {
 }
 
 #[derive(Debug, Clone)]
-pub struct PlanTemplate(Plan);
+pub struct PlanTemplate {
+    plan: Plan,
+    now: SystemTime,
+    policy: Policy,
+}
 
 impl PlanTemplate {
     pub(crate) fn eligible(&self) -> &[(RepoId, Action)] {
-        &self.0.eligible
+        &self.plan.eligible
     }
 }
 
@@ -95,13 +99,11 @@ pub fn plan(
     }
 
     let warning = warn_about(action, snaps, &eligible);
-    PlanTemplate(Plan {
-        action: action.clone(),
-        eligible,
-        skipped,
-        considered: snaps.len(),
-        warning,
-    })
+    PlanTemplate {
+        plan: Plan { action: action.clone(), eligible, skipped, considered: snaps.len(), warning },
+        now,
+        policy: policy.clone(),
+    }
 }
 
 fn warn_about(
@@ -356,20 +358,28 @@ pub fn undo(
         to: git_scylla_core::Oid::parse("0000000").expect("static oid"),
         mode: ResetMode::Hard,
     });
-    PlanTemplate(Plan { action: template, eligible, skipped, considered, warning: None })
+    PlanTemplate {
+        plan: Plan { action: template, eligible, skipped, considered, warning: None },
+        now,
+        policy: policy.clone(),
+    }
 }
 
-pub(crate) fn no_undo() -> PlanTemplate {
-    PlanTemplate(Plan {
-        action: Action::Reset {
-            to: git_scylla_core::Oid::parse("0000000").expect("static oid"),
-            mode: ResetMode::Hard,
+pub(crate) fn no_undo(now: SystemTime, policy: &Policy) -> PlanTemplate {
+    PlanTemplate {
+        plan: Plan {
+            action: Action::Reset {
+                to: git_scylla_core::Oid::parse("0000000").expect("static oid"),
+                mode: ResetMode::Hard,
+            },
+            eligible: Vec::new(),
+            skipped: Vec::new(),
+            considered: 0,
+            warning: None,
         },
-        eligible: Vec::new(),
-        skipped: Vec::new(),
-        considered: 0,
-        warning: None,
-    })
+        now,
+        policy: policy.clone(),
+    }
 }
 
 pub(crate) fn queries_for(t: &PlanTemplate) -> Vec<(RefQuery, Vec<RepoId>)> {
@@ -405,12 +415,23 @@ fn query_of(action: &Action) -> Option<RefQuery> {
 
 pub fn resolve(t: PlanTemplate, snaps: &[RepoSnapshot], answers: &RefAnswers) -> Plan {
     let by_id: HashMap<&RepoId, &RepoSnapshot> = snaps.iter().map(|s| (&s.id, s)).collect();
-    let mut p = t.0;
+    let PlanTemplate { plan: mut p, now, policy } = t;
     let mut kept = Vec::with_capacity(p.eligible.len());
     for (id, action) in std::mem::take(&mut p.eligible) {
-        match finish(&id, action, &by_id, answers) {
-            Ok(action) => kept.push((id, action)),
-            Err(why) => p.skipped.push((id, why)),
+        let action = match finish(&id, action, &by_id, answers) {
+            Ok(action) => action,
+            Err(why) => {
+                p.skipped.push((id, why));
+                continue;
+            }
+        };
+        let Some(snap) = by_id.get(&id) else {
+            p.skipped.push((id, SkipReason::SnapshotStale));
+            continue;
+        };
+        match evaluate(&action, snap, now, &policy) {
+            Eligibility::Eligible => kept.push((id, action)),
+            Eligibility::Skip(why) => p.skipped.push((id, why)),
         }
     }
     p.eligible = kept;
@@ -447,9 +468,6 @@ fn finish(
                 back_to,
                 stash: snap.work.staged > 0 || snap.work.modified > 0,
             };
-            if let Eligibility::Skip(why) = crate::policy::sync_default_resolved(snap, &sync) {
-                return Err(why);
-            }
             Ok(Action::SyncDefault { mode, plan: Some(sync) })
         }
 
@@ -726,7 +744,7 @@ mod tests {
     }
 
     fn plan_all(action: &Action, snaps: &[RepoSnapshot]) -> Plan {
-        plan(action, snaps, &Selection::All, NOW, &Policy::default()).0
+        plan(action, snaps, &Selection::All, NOW, &Policy::default()).plan
     }
 
     fn answered(id: &RepoId, a: Option<Result<RefAnswer, RefError>>) -> RefAnswers {
@@ -941,7 +959,7 @@ mod tests {
             NOW,
             &Policy::default(),
         );
-        let json = serde_json::to_string(&t.0).unwrap();
+        let json = serde_json::to_string(&t.plan).unwrap();
         let err = serde_json::from_str::<Plan>(&json).unwrap_err().to_string();
         assert!(err.contains("unresolved"), "{err}");
 
@@ -1046,7 +1064,8 @@ mod tests {
         let snaps = vec![tracked("a", 0, 3), tracked("b", 0, 3)];
         let sel = Selection::ids([snaps[0].id.clone()]);
         let p =
-            plan(&Action::Pull { mode: PullMode::Rebase }, &snaps, &sel, NOW, &Policy::default()).0;
+            plan(&Action::Pull { mode: PullMode::Rebase }, &snaps, &sel, NOW, &Policy::default())
+                .plan;
         assert_eq!(p.selected(), 1);
         assert_eq!(p.considered, 2);
         assert!(p.render().starts_with("Pull 1 repo (rebase) — 1 of 2 selected"), "{}", p.render());
@@ -1057,7 +1076,8 @@ mod tests {
         let snaps: Vec<RepoSnapshot> = (0..50).map(|i| tracked(&format!("s{i}"), 0, 3)).collect();
         let sel = Selection::ids([snaps[0].id.clone()]);
         let p =
-            plan(&Action::Pull { mode: PullMode::Rebase }, &snaps, &sel, NOW, &Policy::default()).0;
+            plan(&Action::Pull { mode: PullMode::Rebase }, &snaps, &sel, NOW, &Policy::default())
+                .plan;
         assert_eq!(p.skipped.len(), 0);
         assert_eq!(p.eligible.len(), 1);
         assert!(!p.skipped.iter().any(|(_, r)| matches!(r, SkipReason::NotSelected)));
@@ -1171,7 +1191,7 @@ mod tests {
             NOW + Duration::from_secs(60),
             &policy,
         )
-        .0;
+        .plan;
         assert_eq!(p.eligible.len(), 0);
         assert_eq!(p.skipped, vec![(old.id.clone(), SkipReason::SnapshotStale)]);
     }
@@ -1247,7 +1267,7 @@ mod tests {
         let mut times = Vec::new();
         for _ in 0..21 {
             let start = std::time::Instant::now();
-            let p = plan(&action, &snaps, &sel, NOW, &policy).0;
+            let p = plan(&action, &snaps, &sel, NOW, &policy).plan;
             times.push(start.elapsed());
             assert_eq!(p.selected(), 100);
         }

@@ -366,6 +366,34 @@ async fn each_repository_gets_its_own_default_branch_without_a_filesystem() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn already_on_the_trunk_with_a_dirty_tree_is_refused_once_the_trunk_is_named() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = fake_root(&tmp);
+    let (engine, h) = fake_engine(
+        &root,
+        vec![
+            FakeRepo::new(root.join("on-trunk")).snapshot(|s| s.work.modified = 1),
+            FakeRepo::new(root.join("off-trunk")).snapshot(|s| {
+                s.head = Head::Branch("feature".into());
+                s.work.modified = 1;
+            }),
+        ],
+    )
+    .await;
+
+    let plan = h.plan(SYNC, Selection::All).await.unwrap();
+
+    let skipped: Vec<_> =
+        plan.skipped.iter().map(|(id, why)| (id.name().to_string(), why.clone())).collect();
+    assert_eq!(skipped, vec![("on-trunk".to_string(), SkipReason::DirtyWorktree)]);
+
+    let eligible: Vec<_> = plan.eligible.iter().map(|(id, _)| id.name().to_string()).collect();
+    assert_eq!(eligible, vec!["off-trunk".to_string()]);
+
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_trunk_the_probe_cannot_name_is_refused_by_name() {
     let tmp = tempfile::tempdir().unwrap();
     let root = fake_root(&tmp);

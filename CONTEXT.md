@@ -50,8 +50,19 @@ missing — this repository is simply in a state the action refuses.
 
 A third thing because the remedy is a third thing. An unresolvable repository
 needs a repository that can answer; an unvalidatable one needs the user to type
-something else; a gated one needs the repository changed. Gating runs after
-resolving, since the facts it judges are the ones resolving produced.
+something else; a gated one needs the repository changed.
+
+The gate runs twice, over the same action at two stages of completeness. Once
+on the template, because a repository that will be refused should not be asked
+a **ref question** — the first pass is what keeps the cold reads down to the
+repositories that could actually run. Once more on the finished action, because
+a rule like sync's cannot be judged until resolving has named the trunk.
+
+Both passes are the same function, judged against the same snapshot, the same
+clock and the same policy, so the second changes an answer only where the first
+was missing a fact. That is the point: a rule that needs a resolved fact is
+enforced by the gate like every other rule, rather than by whichever step of
+resolving remembered to ask.
 
 ## Hot and cold facts
 

@@ -14,8 +14,7 @@ pub use plan::{
     PlanView, RefAnswers, SkipGroup,
 };
 pub use policy::{
-    after_attempt, due, evaluate, jitter, manual_attempt, sync_default_resolved, Attempt,
-    Eligibility, FetchPolicy, Policy,
+    after_attempt, due, evaluate, jitter, manual_attempt, Attempt, Eligibility, FetchPolicy, Policy,
 };
 pub use probe_traffic::{ProbeTraffic, Why};
 pub use sched::{Launch, Limits, Scheduler, Ticket};

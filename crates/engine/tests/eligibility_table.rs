@@ -9,7 +9,7 @@
 use git_scylla_core::SkipReason;
 use git_scylla_core::{Action, PullMode, RepoSnapshot, SyncPlan};
 use git_scylla_discovery::{WalkOptions, Walker};
-use git_scylla_engine::{evaluate, sync_default_resolved, Eligibility, Policy};
+use git_scylla_engine::{evaluate, Eligibility, Policy};
 use git_scylla_probe::{GitCliProbe, Probe, ProbeRequest};
 use git_scylla_testkit::FixtureSet;
 use std::collections::BTreeMap;
@@ -74,16 +74,6 @@ fn columns() -> Vec<(&'static str, Action)> {
             },
         ),
     ]
-}
-
-fn verdict(action: &Action, snap: &RepoSnapshot, now: SystemTime, policy: &Policy) -> Eligibility {
-    let first = evaluate(action, snap, now, policy);
-    match (&first, action) {
-        (Eligibility::Eligible, Action::SyncDefault { plan: Some(p), .. }) => {
-            sync_default_resolved(snap, p)
-        }
-        _ => first,
-    }
 }
 
 fn code(e: &Eligibility) -> String {
@@ -166,7 +156,7 @@ fn render(snapshots: &BTreeMap<String, RepoSnapshot>) -> String {
         for (i, (_, action)) in cols.iter().enumerate() {
             out.push_str(&format!(
                 "  {:w$}",
-                code(&verdict(action, snap, now, &policy)),
+                code(&evaluate(action, snap, now, &policy)),
                 w = widths[i]
             ));
         }
@@ -218,7 +208,7 @@ async fn no_fixture_is_eligible_for_an_action_that_would_obviously_destroy_work(
 
     for (name, snap) in &snapshots {
         for (label, action) in columns() {
-            let eligible = verdict(&action, snap, now, &policy).is_eligible();
+            let eligible = evaluate(&action, snap, now, &policy).is_eligible();
             if !eligible {
                 continue;
             }

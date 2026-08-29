@@ -80,7 +80,7 @@ pub fn evaluate(
         Action::StashPop => stash_pop(snap),
         Action::Branch { .. } => branch(snap),
         Action::Reset { to, .. } => reset(snap, to),
-        Action::SyncDefault { .. } => sync_default(snap),
+        Action::SyncDefault { plan, .. } => sync_default(snap, plan.as_ref()),
         Action::DevTag { push, .. } => dev_tag(snap, push.is_some()),
         Action::Custom { .. } => custom(snap),
     }
@@ -257,20 +257,17 @@ fn dev_tag(snap: &RepoSnapshot, push: bool) -> Eligibility {
     Eligibility::Eligible
 }
 
-fn sync_default(snap: &RepoSnapshot) -> Eligibility {
+fn sync_default(snap: &RepoSnapshot, plan: Option<&SyncPlan>) -> Eligibility {
     if let Some(skip) = worktree_blockers(snap).or_else(|| branch_blockers(snap)) {
-        // A branch, not just a worktree: the action promises to put the user
-        // back where they were, which a detached HEAD cannot honor.
         return Eligibility::Skip(skip);
     }
     if snap.remotes.is_empty() {
         return Eligibility::Skip(SkipReason::NoRemote);
     }
-    Eligibility::Eligible
-}
-pub fn sync_default_resolved(snap: &RepoSnapshot, plan: &SyncPlan) -> Eligibility {
-    if plan.default == plan.back_to && !snap.is_clean() {
-        return Eligibility::Skip(SkipReason::DirtyWorktree);
+    if let Some(plan) = plan {
+        if plan.default == plan.back_to && !snap.is_clean() {
+            return Eligibility::Skip(SkipReason::DirtyWorktree);
+        }
     }
     Eligibility::Eligible
 }
