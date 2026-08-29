@@ -26,7 +26,7 @@ function repo(name: string): RepoRow {
     badge_rank: 7,
     stale: false,
     status: "",
-    fetch_cell: { text: "no remote", problem: false, detail: null },
+    fetch_cell: { status: { type: "NoRemote" }, problem: false, detail: null },
     id: `/work/${name}` as RepoId,
     path: `/work/${name}`,
     kind: { type: "Normal" },
@@ -46,7 +46,6 @@ function repo(name: string): RepoRow {
 
 const ROWS = ["alpha", "bravo", "charlie", "delta"].map(repo);
 
-/** The selection state the real window owns, so the grid can be driven. */
 function Harness({ rows = ROWS }: { rows?: RepoRow[] }) {
   const [selected, setSelected] = useState<Set<RepoId>>(new Set());
   const [sort, setSort] = useState<Sort>({ key: "name", dir: "asc" });
@@ -66,7 +65,6 @@ function Harness({ rows = ROWS }: { rows?: RepoRow[] }) {
   );
 }
 
-/** The rows `scrollIntoView` was called on, in order, by repository name. */
 let scrolled: string[];
 
 beforeEach(() => {
@@ -83,8 +81,6 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-// By the name column specifically: with `/work` as the root, the path column
-// renders the same word, so a bare text query matches two cells.
 const rowFor = (name: string) =>
   screen.getAllByRole("row").find((r) => r.querySelector(".col-name")?.textContent === name)!;
 const selectedNames = () =>

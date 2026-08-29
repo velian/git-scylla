@@ -12,31 +12,7 @@ import type { RepoKind } from "./RepoKind";
 import type { Upstream } from "./Upstream";
 import type { WorkTree } from "./WorkTree";
 
-/**
- * A snapshot plus what the grid derives from it. `#[serde(flatten)]` keeps
- * the wire shape one flat object: a row is a repository with extra columns.
- */
-export type RepoRow = { badge: Badge, 
-/**
- * The badge as a word, from `Badge`'s `Display`. Also the CSS class.
- */
-badge_label: string, 
-/**
- * Not verified by the running process, or verified too long ago. The
- * same predicate the `SnapshotStale` precondition uses.
- */
-stale: boolean, 
-/**
- * Sort priority, worst first. A number because the ordering is
- * [`Badge`]'s declaration order, which a TypeScript string union cannot
- * express.
- */
-badge_rank: number, 
-/**
- * The compact status column, from `RepoSnapshot::status_line` — the
- * same string the CLI's STATUS column shows.
- */
-status: string, fetch_cell: FetchCell, id: RepoId, path: string, kind: RepoKind, head: Head, 
+export type RepoRow = { badge: Badge, badge_label: string, stale: boolean, badge_rank: number, status: string, fetch_cell: FetchCell, id: RepoId, path: string, kind: RepoKind, head: Head, 
 /**
  * The commit `HEAD` resolves to.
  *

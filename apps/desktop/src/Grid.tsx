@@ -10,6 +10,7 @@ import {
   type SortKey,
 } from "./columns";
 import { engine } from "./engine/client";
+import { FetchCellView } from "./FetchCell";
 import { useDismiss } from "./useDismiss";
 
 const COLUMNS: { key: SortKey; label: string; className: string }[] = [
@@ -81,7 +82,6 @@ export function Grid({ rows, roots, selected, onSelected, onError, sort, onSort 
     }
   }
 
-  /** The selection extended from the anchor to `to`, over the displayed rows. */
   function extendedTo(to: number): Set<RepoId> {
     const next = new Set(selected);
     const from = anchor === null ? -1 : sorted.findIndex((r) => r.id === anchor);
@@ -167,7 +167,6 @@ export function Grid({ rows, roots, selected, onSelected, onError, sort, onSort 
         <tbody>
           {sorted.map((row, index) => {
             const problem = outcomeDetail(row);
-            const fetch = row.fetch_cell;
             return (
               <tr
                 key={row.id}
@@ -185,8 +184,6 @@ export function Grid({ rows, roots, selected, onSelected, onError, sort, onSort 
                     type="checkbox"
                     checked={selected.has(row.id)}
                     aria-label={`Select ${name(row)}`}
-                    // Toggled from onClick, which also stops the row's own click —
-                    // a plain click replaces the selection, but ticking a box must not.
                     readOnly
                     onClick={(e) => {
                       e.stopPropagation();
@@ -215,20 +212,7 @@ export function Grid({ rows, roots, selected, onSelected, onError, sort, onSort 
                   </span>
                 </td>
                 <td className="col-status">{row.status}</td>
-                <td className={`col-fetch ${fetch.problem ? "is-problem" : ""}`} title={fetch.detail ?? undefined}>
-                  {fetch.text}
-                  {fetch.problem && (
-                    <button
-                      className="inline-action"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        engine.fetchNow(row.id).catch(onError);
-                      }}
-                    >
-                      Fetch now
-                    </button>
-                  )}
-                </td>
+                <FetchCellView id={row.id} cell={row.fetch_cell} onError={onError} />
               </tr>
             );
           })}
