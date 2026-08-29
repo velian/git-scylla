@@ -1,4 +1,4 @@
-use crate::{ProbeOutcome, RepoSnapshot};
+use crate::{FetchStatus, ProbeOutcome, RepoSnapshot};
 use serde::{Deserialize, Serialize};
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Badge {
     Conflict,
-    /// A merge, rebase, cherry-pick, revert or bisect left half-finished.
     InProgress,
     Diverged,
     Behind,
@@ -16,8 +15,7 @@ pub enum Badge {
     Dirty,
     Staged,
     Clean,
-    /// The probe failed or timed out, or the upstream's tracking ref is gone.
-    /// Never rendered as clean.
+    Unreachable,
     Unknown,
 }
 
@@ -32,16 +30,13 @@ impl std::fmt::Display for Badge {
             Badge::Dirty => "dirty",
             Badge::Staged => "staged",
             Badge::Clean => "clean",
+            Badge::Unreachable => "unreachable",
             Badge::Unknown => "unknown",
         })
     }
 }
 
 impl RepoSnapshot {
-    /// Collapse the facts into one badge, worst-first.
-    ///
-    /// Precedence is the declaration order of [`Badge`], and nothing else
-    /// breaks ties.
     pub fn badge(&self) -> Badge {
         if !matches!(self.outcome, ProbeOutcome::Ok) {
             return Badge::Unknown;
@@ -53,8 +48,10 @@ impl RepoSnapshot {
             return Badge::InProgress;
         }
         if let Some(up) = &self.upstream {
+            let quarantined = matches!(self.fetch_status(), FetchStatus::Quarantined { .. });
             match &up.sync {
                 None => return Badge::Unknown,
+                Some(_) if quarantined => return Badge::Unreachable,
                 Some(ab) if ab.diverged() => return Badge::Diverged,
                 Some(ab) if ab.behind > 0 => return Badge::Behind,
                 Some(ab) if ab.ahead > 0 => return Badge::Ahead,
@@ -74,7 +71,8 @@ impl RepoSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AheadBehind, InProgress, Upstream};
+    use crate::{AheadBehind, FetchHealth, FetchSchedule, InProgress, Upstream};
+    use std::time::SystemTime;
 
     fn snap() -> RepoSnapshot {
         RepoSnapshot::stub("/r")
@@ -110,6 +108,31 @@ mod tests {
         let mut s = with_sync(3, 7);
         s.work.staged = 1;
         assert_eq!(s.badge(), Badge::Diverged);
+    }
+
+    #[test]
+    fn a_quarantined_remote_reads_as_unreachable_not_ahead() {
+        let mut s = with_sync(3, 0);
+        s.fetch = FetchHealth {
+            last_attempt: Some(SystemTime::now()),
+            last_success: None,
+            schedule: FetchSchedule::Quarantined {
+                since: SystemTime::now(),
+                last_error: "repository not found".into(),
+            },
+        };
+        assert_eq!(s.badge(), Badge::Unreachable);
+    }
+
+    #[test]
+    fn backing_off_does_not_yet_distrust_the_ahead_behind_count() {
+        let mut s = with_sync(3, 0);
+        s.fetch = FetchHealth {
+            last_attempt: Some(SystemTime::now()),
+            last_success: None,
+            schedule: FetchSchedule::BackingOff { until: SystemTime::now(), failures: 2 },
+        };
+        assert_eq!(s.badge(), Badge::Ahead);
     }
 
     #[test]
@@ -189,6 +212,7 @@ mod tests {
             Badge::Staged,
             Badge::Behind,
             Badge::Dirty,
+            Badge::Unreachable,
         ];
         all.sort();
         assert_eq!(
@@ -202,6 +226,7 @@ mod tests {
                 Badge::Dirty,
                 Badge::Staged,
                 Badge::Clean,
+                Badge::Unreachable,
                 Badge::Unknown,
             ]
         );

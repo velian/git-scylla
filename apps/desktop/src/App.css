@@ -420,6 +420,7 @@ tbody tr.is-stale { opacity: 0.55; }
 .badge--dirty    { color: #ff9f0a; }
 .badge--staged   { color: #0a84ff; }
 .badge--clean    { color: #30d158; }
+.badge--unreachable { color: #ff453a; }
 .badge--unknown  { color: var(--fg-dim); }
 
 .menu {

@@ -5,4 +5,4 @@
  *
  * Derived, never stored; declaration order is the sort priority, worst first.
  */
-export type Badge = "Conflict" | "InProgress" | "Diverged" | "Behind" | "Ahead" | "Dirty" | "Staged" | "Clean" | "Unknown";
+export type Badge = "Conflict" | "InProgress" | "Diverged" | "Behind" | "Ahead" | "Dirty" | "Staged" | "Clean" | "Unreachable" | "Unknown";

@@ -17,7 +17,7 @@ STATUS COLUMN
   \u{2191}? \u{2193}?  upstream configured but its remote-tracking ref is gone
 
 BADGES, in sort priority order
-  conflict diverged behind ahead dirty staged clean unknown
+  conflict diverged behind ahead dirty staged clean unreachable unknown
 
 FETCH COLUMN
   The fetch scheduler's health for this repository. When it is healthy this is
@@ -68,6 +68,7 @@ impl Palette {
                 Badge::Dirty => AnsiColor::Yellow,
                 Badge::Staged => AnsiColor::Blue,
                 Badge::Clean => AnsiColor::Green,
+                Badge::Unreachable => AnsiColor::Red,
                 Badge::Unknown => AnsiColor::BrightBlack,
             }
             .into(),
@@ -103,7 +104,6 @@ pub fn table(rows: &[RepoSnapshot]) {
         .collect();
 
     let headers = ["PATH", "BRANCH", "BADGE", "STATUS", "FETCH"];
-    // Widths from the plain strings; colour escapes must not count toward them.
     let mut w = headers.map(str::len);
     for row in &cells {
         for (i, cell) in row.iter().enumerate() {
@@ -125,13 +125,11 @@ pub fn table(rows: &[RepoSnapshot]) {
         );
         println!("{}", line.trim_end());
         if let ProbeOutcome::Error(msg) = &snap.outcome {
-            // A failed probe must never be silently a row of dashes.
             println!("    {}", p.dim(&format!("error: {}", first_line(msg))));
         }
     }
 }
 
-/// Padding a coloured string needs the escape bytes added back to the width.
 fn colour_slack(p: &Palette, plain: &str, painted: &str) -> usize {
     if p.on {
         painted.chars().count().saturating_sub(plain.chars().count())
@@ -150,7 +148,6 @@ fn pad(s: &str, w: usize) -> String {
 }
 
 fn branch_cell(s: &RepoSnapshot) -> String {
-    // An untrustworthy snapshot has no real head; its oid is a placeholder.
     if !s.is_trustworthy() {
         return "?".into();
     }
@@ -161,7 +158,6 @@ fn branch_cell(s: &RepoSnapshot) -> String {
     }
 }
 
-/// The scheduler's health readout for this repository.
 pub fn fetch_cell(s: &RepoSnapshot, now: SystemTime) -> String {
     match s.fetch_status() {
         FetchStatus::NoRemote => "no remote".into(),
@@ -171,7 +167,6 @@ pub fn fetch_cell(s: &RepoSnapshot, now: SystemTime) -> String {
             Ok(d) => format!("retry in {} ({failures})", duration::brief(d)),
             Err(_) => format!("retry due ({failures})"),
         },
-        // A future timestamp means the clock moved; "just now" is still honest.
         FetchStatus::Fetched { at } => {
             now.duration_since(at).map_or_else(|_| "just now".into(), duration::since)
         }
@@ -183,7 +178,6 @@ fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or(s)
 }
 
-/// The longest directory prefix shared by every row, so paths are readable.
 fn common_root(rows: &[RepoSnapshot]) -> PathBuf {
     let mut iter = rows.iter().map(|s| s.path.as_path());
     let Some(first) = iter.next() else { return PathBuf::new() };

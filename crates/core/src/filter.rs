@@ -301,6 +301,7 @@ fn parse_badge(s: &str) -> Option<Badge> {
         "dirty" => Badge::Dirty,
         "staged" => Badge::Staged,
         "clean" => Badge::Clean,
+        "unreachable" => Badge::Unreachable,
         "unknown" => Badge::Unknown,
         _ => return None,
     })
