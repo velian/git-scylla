@@ -47,6 +47,9 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  useEffect(() => {
+    if (roots.loaded) setSidebarCollapsed(roots.paths.length > 0);
+  }, [roots.loaded]);
   const [placeholders, setPlaceholders] = useState<Placeholder[]>([]);
   useEffect(() => {
     engine.templatePlaceholders().then(setPlaceholders).catch(() => {});

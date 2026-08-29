@@ -15,6 +15,7 @@ const EMPTY: Config = {
 export type Roots = {
   paths: string[];
   config: Config;
+  loaded: boolean;
   adopt: (config: Config) => void;
   add: () => Promise<void>;
   remove: (path: string) => Promise<void>;
@@ -25,6 +26,7 @@ export function useRoots(
   onError: (e: unknown) => void,
 ): Roots {
   const [config, setConfig] = useState<Config>(EMPTY);
+  const [loaded, setLoaded] = useState(false);
   const paths = config.roots;
   const { rescan, reset } = scan;
 
@@ -33,6 +35,7 @@ export function useRoots(
       .getConfig()
       .then((config) => {
         setConfig(config);
+        setLoaded(true);
         return rescan(config.roots);
       })
       .catch(onError);
@@ -70,5 +73,5 @@ export function useRoots(
 
   const adopt = useCallback((next: Config) => setConfig(next), []);
 
-  return { paths, config, adopt, add, remove };
+  return { paths, config, loaded, adopt, add, remove };
 }
