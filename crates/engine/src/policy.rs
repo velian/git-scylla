@@ -480,7 +480,7 @@ mod tests {
             sync: Some(AheadBehind { ahead: 0, behind: 0 }),
             last_fetch: Some(T0),
         });
-        s.remotes = vec![Remote { name: "origin".into(), host: None }];
+        s.remotes = vec![Remote { name: "origin".into(), host: None, web: None }];
         s.fetch = FetchHealth::due_now(T0);
         s
     }
@@ -987,7 +987,8 @@ mod fetch_schedule {
             sync: Some(git_scylla_core::AheadBehind { ahead: 0, behind: 0 }),
             last_fetch: Some(T0),
         });
-        s.remotes = vec![Remote { name: "origin".into(), host: Some("example.invalid".into()) }];
+        s.remotes =
+            vec![Remote { name: "origin".into(), host: Some("example.invalid".into()), web: None }];
         s.fetch = FetchHealth::due_now(T0);
         s
     }

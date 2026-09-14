@@ -13,6 +13,7 @@ import {
   name,
   outcomeDetail,
   relativePath,
+  webUrl,
   type SortDir,
   type SortKey,
 } from "./columns";
@@ -117,6 +118,14 @@ export const Grid = forwardRef<GridHandle, Props>(function Grid(
       e.preventDefault();
       const row = sorted[here];
       engine.handOff(e.key === "t" ? "Terminal" : "Editor", row.path).catch(onError);
+      return;
+    }
+
+    if (e.key === "w") {
+      if (here === -1) return;
+      e.preventDefault();
+      const url = webUrl(sorted[here]);
+      if (url) engine.openWeb(url).catch(onError);
     }
   }
 
@@ -279,6 +288,8 @@ function RowMenu({
   const root = useRef<HTMLUListElement>(null);
   useDismiss(root, onClose);
 
+  const web = webUrl(row);
+
   return (
     <ul ref={root} className="menu" style={{ left: x, top: y }} onClick={(e) => e.stopPropagation()}>
       <li>
@@ -296,6 +307,14 @@ function RowMenu({
           <span className="menu__hint">o</span>
         </button>
       </li>
+      {web && (
+        <li>
+          <button onClick={() => run(engine.openWeb(web))}>
+            Open on the web
+            <span className="menu__hint">w</span>
+          </button>
+        </li>
+      )}
       <li>
         <button onClick={() => run(navigator.clipboard.writeText(row.path))}>Copy path</button>
       </li>

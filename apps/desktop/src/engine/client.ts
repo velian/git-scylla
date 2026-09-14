@@ -88,6 +88,8 @@ export const engine = {
   handOff: (what: Handoff, path: string): Promise<void> =>
     invoke("hand_off", { what, path }),
 
+  openWeb: (url: string): Promise<void> => invoke("open_web", { url }),
+
   fetchNow: (id: RepoId): Promise<BatchId> => invoke("fetch_now", { id }),
 
   setHasSelection: (has: boolean): Promise<void> => invoke("set_has_selection", { has }),

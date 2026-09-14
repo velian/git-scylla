@@ -259,7 +259,7 @@ mod tests {
     #[test]
     fn a_tag_the_remote_already_has_is_not_a_non_fast_forward() {
         assert_eq!(
-            kind_of(&["! [rejected]        HEAD -> v1.0.0-dev.1 (already exists)"]),
+            kind_of(&["! [rejected]        HEAD -> v1.0.0-dev1 (already exists)"]),
             Some(FailureKind::TagExists)
         );
         assert_eq!(

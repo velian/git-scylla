@@ -7,6 +7,7 @@ import { useRef, useState } from "react";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { engine } from "./engine/client";
 import { Grid, type GridHandle, type Sort } from "./Grid";
 import type { RepoId, RepoRow } from "./bindings";
 
@@ -14,6 +15,7 @@ import type { RepoId, RepoRow } from "./bindings";
 vi.mock("./engine/client", () => ({
   engine: {
     handOff: vi.fn().mockResolvedValue(undefined),
+    openWeb: vi.fn().mockResolvedValue(undefined),
     refreshRepo: vi.fn().mockResolvedValue(undefined),
     fetchNow: vi.fn().mockResolvedValue(undefined),
   },
@@ -45,6 +47,11 @@ function repo(name: string): RepoRow {
 }
 
 const ROWS = ["alpha", "bravo", "charlie", "delta"].map(repo);
+
+/** The same row, with remotes as `probe` would have derived them. */
+function hosted(name: string, remotes: RepoRow["remotes"]): RepoRow {
+  return { ...repo(name), remotes };
+}
 
 function Harness({ rows = ROWS }: { rows?: RepoRow[] }) {
   const [selected, setSelected] = useState<Set<RepoId>>(new Set());
@@ -264,5 +271,58 @@ describe("the row context menu", () => {
     await user.click(screen.getByRole("list"));
 
     expect(screen.getByRole("button", { name: "Reveal in Finder" })).toBeDefined();
+  });
+});
+
+describe("opening a repository on the web", () => {
+  const ORIGIN = { name: "origin", host: "github.com", web: "https://github.com/o/alpha" };
+  const FORK = { name: "fork", host: "github.com", web: "https://github.com/me/alpha" };
+  const LOCAL = { name: "origin", host: null, web: null };
+
+  beforeEach(() => {
+    vi.mocked(engine.openWeb).mockClear();
+  });
+
+  it("opens the page of the row under the cursor on w", async () => {
+    const user = userEvent.setup();
+    render(<Harness rows={[hosted("alpha", [ORIGIN])]} />);
+
+    await user.click(rowFor("alpha"));
+    await user.keyboard("w");
+
+    expect(engine.openWeb).toHaveBeenCalledWith("https://github.com/o/alpha");
+  });
+
+  it("prefers origin over the other remotes", async () => {
+    const user = userEvent.setup();
+    render(<Harness rows={[hosted("alpha", [FORK, ORIGIN])]} />);
+
+    await user.click(rowFor("alpha"));
+    await user.keyboard("w");
+
+    expect(engine.openWeb).toHaveBeenCalledWith("https://github.com/o/alpha");
+  });
+
+  it("does nothing for a repository whose remotes are local paths", async () => {
+    const user = userEvent.setup();
+    render(<Harness rows={[hosted("alpha", [LOCAL])]} />);
+
+    await user.click(rowFor("alpha"));
+    await user.keyboard("w");
+
+    expect(engine.openWeb).not.toHaveBeenCalled();
+  });
+
+  it("offers the menu item only where there is a page to open", async () => {
+    const user = userEvent.setup();
+    render(<Harness rows={[hosted("alpha", [ORIGIN]), hosted("bravo", [LOCAL])]} />);
+
+    await user.pointer({ target: rowFor("bravo"), keys: "[MouseRight]" });
+    expect(screen.queryByRole("button", { name: /Open on the web/ })).toBeNull();
+
+    await user.pointer({ target: rowFor("alpha"), keys: "[MouseRight]" });
+    await user.click(screen.getByRole("button", { name: /Open on the web/ }));
+
+    expect(engine.openWeb).toHaveBeenCalledWith("https://github.com/o/alpha");
   });
 });

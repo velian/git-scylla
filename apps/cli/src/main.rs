@@ -226,9 +226,10 @@ enum Command {
 
     /// Cut the next tag in a pre-release series, in every selected repository.
     ///
-    /// The name is derived per repository from its own tags, so a working set
-    /// at different versions gets different names. `--dry-run` lists every one
-    /// before anything is created.
+    /// The name is derived per repository from its own tags — `v1.2.3-dev0`,
+    /// counting up within a version — so a working set at different versions
+    /// gets different names. `--dry-run` lists every one before anything is
+    /// created.
     ///
     /// The tag is published before it is created locally: a name the remote
     /// already has is refused before anything local exists.

@@ -9,4 +9,12 @@ name: string,
  * Host parsed from the configured URL. `None` for a path remote or an
  * unparseable URL.
  */
-host: string | null, };
+host: string | null, 
+/**
+ * The repository's page on that host, derived from the same URL. `None`
+ * wherever `host` is, and for a URL that names no repository.
+ *
+ * Defaulted on read: a cache written before this field existed restores
+ * as a repository whose page is unknown until it is probed again.
+ */
+web: string | null, };

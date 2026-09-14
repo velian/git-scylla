@@ -348,7 +348,7 @@ mod tests {
     use git_scylla_core::Remote;
 
     fn remote(name: &str) -> Remote {
-        Remote { name: name.to_string(), host: None }
+        Remote { name: name.to_string(), host: None, web: None }
     }
 
     #[test]

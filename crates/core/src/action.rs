@@ -426,13 +426,13 @@ mod tests {
             Action::DevTag {
                 channel: "dev".into(),
                 bump: crate::version::Bump::Minor,
-                name: Some("v2.4.0-dev.3".into()),
+                name: Some("v2.4.0-dev3".into()),
                 push: Some("origin".into()),
             },
             Action::DevTag {
                 channel: "rc".into(),
                 bump: crate::version::Bump::Major,
-                name: Some("v3.0.0-rc.1".into()),
+                name: Some("v3.0.0-rc1".into()),
                 push: None,
             },
         ]
@@ -540,18 +540,18 @@ mod tests {
 
     #[test]
     fn a_tag_is_published_before_it_is_created_locally() {
-        let steps = dev_tag("v2.4.0-dev.3", Some("origin")).steps();
+        let steps = dev_tag("v2.4.0-dev3", Some("origin")).steps();
         assert_eq!(steps.len(), 2);
-        assert_eq!(steps[0].argv, ["push", "origin", "HEAD:refs/tags/v2.4.0-dev.3"]);
-        assert_eq!(steps[1].argv, ["tag", "v2.4.0-dev.3"]);
+        assert_eq!(steps[0].argv, ["push", "origin", "HEAD:refs/tags/v2.4.0-dev3"]);
+        assert_eq!(steps[1].argv, ["tag", "v2.4.0-dev3"]);
         assert!(steps.iter().all(|s| s.compensate.is_none()));
     }
 
     #[test]
     fn a_local_only_tag_is_one_step() {
-        let steps = dev_tag("v2.4.0-dev.3", None).steps();
+        let steps = dev_tag("v2.4.0-dev3", None).steps();
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].argv, ["tag", "v2.4.0-dev.3"]);
+        assert_eq!(steps[0].argv, ["tag", "v2.4.0-dev3"]);
     }
 
     #[test]
@@ -567,16 +567,16 @@ mod tests {
 
     #[test]
     fn a_tag_reaches_the_network_only_when_it_publishes() {
-        assert!(dev_tag("v1.0.0-dev.1", Some("origin")).is_network());
-        assert!(!dev_tag("v1.0.0-dev.1", None).is_network());
+        assert!(dev_tag("v1.0.0-dev1", Some("origin")).is_network());
+        assert!(!dev_tag("v1.0.0-dev1", None).is_network());
     }
 
     #[test]
     fn a_published_tag_and_a_local_one_are_unundoable_for_different_reasons() {
-        let Undoable::No(published) = undoability(&dev_tag("v1.0.0-dev.1", Some("origin"))) else {
+        let Undoable::No(published) = undoability(&dev_tag("v1.0.0-dev1", Some("origin"))) else {
             panic!("a published tag cannot be undone by moving HEAD")
         };
-        let Undoable::No(local) = undoability(&dev_tag("v1.0.0-dev.1", None)) else {
+        let Undoable::No(local) = undoability(&dev_tag("v1.0.0-dev1", None)) else {
             panic!("creating a tag moves nothing for a reset to repair")
         };
         assert!(published.contains("remote"), "{published}");

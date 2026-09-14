@@ -140,6 +140,17 @@ pub fn hand_off<R: tauri::Runtime>(
 }
 
 #[tauri::command]
+pub fn open_web<R: tauri::Runtime>(handle: tauri::AppHandle<R>, url: String) -> Result<()> {
+    if !url.starts_with("https://") {
+        return Err(BridgeError::new(ErrorKind::Io, format!("not a web address: {url}")));
+    }
+    handle
+        .opener()
+        .open_url(&url, None::<&str>)
+        .map_err(|e| BridgeError::new(ErrorKind::Io, format!("could not open {url}: {e}")))
+}
+
+#[tauri::command]
 pub fn resolved_terminal(app: State<'_, App>) -> String {
     let configured = app.config().terminal.clone();
     handoff::terminal_app(configured.as_deref())

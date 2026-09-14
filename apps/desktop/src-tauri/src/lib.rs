@@ -35,6 +35,7 @@ macro_rules! command_handler {
             $crate::commands::remove_root,
             $crate::commands::open_full_disk_access_settings,
             $crate::commands::hand_off,
+            $crate::commands::open_web,
             $crate::commands::set_editor,
             $crate::commands::set_terminal,
             $crate::commands::resolved_terminal,

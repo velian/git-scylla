@@ -43,6 +43,11 @@ export function branch(row: RepoRow): string {
   }
 }
 
+export function webUrl(row: RepoRow): string | undefined {
+  const origin = row.remotes.find((r) => r.name === "origin" && r.web);
+  return (origin ?? row.remotes.find((r) => r.web))?.web ?? undefined;
+}
+
 /** The tooltip for a row whose probe did not succeed. */
 export function outcomeDetail(row: RepoRow): string | undefined {
   switch (row.outcome.type) {

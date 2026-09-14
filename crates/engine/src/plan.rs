@@ -727,7 +727,7 @@ mod tests {
 
     fn base(name: &str) -> RepoSnapshot {
         let mut s = RepoSnapshot::stub(format!("/r/{name}"));
-        s.remotes = vec![Remote { name: "origin".into(), host: None }];
+        s.remotes = vec![Remote { name: "origin".into(), host: None, web: None }];
         s.fetch = FetchHealth::due_now(NOW);
         s
     }
@@ -881,11 +881,11 @@ mod tests {
         let resolved = one(
             dev_tag_template(),
             on_branch("r", "main"),
-            Some(Ok(RefAnswer::Tags(vec!["v1.2.0".into(), "v1.3.0-dev.1".into()]))),
+            Some(Ok(RefAnswer::Tags(vec!["v1.2.0".into(), "v1.3.0-dev1".into()]))),
         )
         .expect("tags answered");
         let Action::DevTag { name: Some(name), .. } = resolved else { panic!("unresolved") };
-        assert_eq!(name, "v1.3.0-dev.2");
+        assert_eq!(name, "v1.3.0-dev2");
     }
 
     #[test]
@@ -1095,15 +1095,15 @@ mod tests {
     #[test]
     fn push_resolves_the_remote_per_repository() {
         let mut has_origin = tracked("a", 1, 0);
-        has_origin.remotes = vec![Remote { name: "origin".into(), host: None }];
+        has_origin.remotes = vec![Remote { name: "origin".into(), host: None, web: None }];
 
         let mut has_other = tracked("b", 1, 0);
-        has_other.remotes = vec![Remote { name: "fork".into(), host: None }];
+        has_other.remotes = vec![Remote { name: "fork".into(), host: None, web: None }];
 
         let mut has_both = tracked("c", 1, 0);
         has_both.remotes = vec![
-            Remote { name: "fork".into(), host: None },
-            Remote { name: "origin".into(), host: None },
+            Remote { name: "fork".into(), host: None, web: None },
+            Remote { name: "origin".into(), host: None, web: None },
         ];
 
         let template =
@@ -1123,9 +1123,9 @@ mod tests {
     #[test]
     fn a_plan_that_resolved_to_several_commands_reports_every_one() {
         let mut a = tracked("a", 1, 0);
-        a.remotes = vec![Remote { name: "origin".into(), host: None }];
+        a.remotes = vec![Remote { name: "origin".into(), host: None, web: None }];
         let mut b = tracked("b", 1, 0);
-        b.remotes = vec![Remote { name: "fork".into(), host: None }];
+        b.remotes = vec![Remote { name: "fork".into(), host: None, web: None }];
 
         let p = plan_all(
             &Action::Push { set_upstream: Some("origin".into()), force_with_lease: false },
@@ -1324,9 +1324,9 @@ mod tests {
     #[test]
     fn several_resolved_commands_reach_the_view_and_the_text_alike() {
         let mut a = tracked("a", 1, 0);
-        a.remotes = vec![Remote { name: "origin".into(), host: None }];
+        a.remotes = vec![Remote { name: "origin".into(), host: None, web: None }];
         let mut b = tracked("b", 1, 0);
-        b.remotes = vec![Remote { name: "fork".into(), host: None }];
+        b.remotes = vec![Remote { name: "fork".into(), host: None, web: None }];
         let p = plan_all(
             &Action::Push { set_upstream: Some("origin".into()), force_with_lease: false },
             &[a, b],
@@ -1344,9 +1344,9 @@ mod tests {
     #[test]
     fn a_command_with_one_repository_is_labelled_by_name_not_by_count() {
         let mut a = tracked("a", 1, 0);
-        a.remotes = vec![Remote { name: "origin".into(), host: None }];
+        a.remotes = vec![Remote { name: "origin".into(), host: None, web: None }];
         let mut b = tracked("b", 1, 0);
-        b.remotes = vec![Remote { name: "fork".into(), host: None }];
+        b.remotes = vec![Remote { name: "fork".into(), host: None, web: None }];
         let action = Action::Push { set_upstream: Some("origin".into()), force_with_lease: false };
         let view = plan_all(&action, &[a, b]).view();
 
@@ -1359,7 +1359,7 @@ mod tests {
     #[test]
     fn one_command_is_not_announced_in_the_plural() {
         let mut a = tracked("a", 1, 0);
-        a.remotes = vec![Remote { name: "origin".into(), host: None }];
+        a.remotes = vec![Remote { name: "origin".into(), host: None, web: None }];
         let action = Action::SyncDefault { mode: PullMode::FfOnly, plan: None };
         let view = plan_all(&action, &[a]).view();
         assert_eq!(view.variants.len(), 1);

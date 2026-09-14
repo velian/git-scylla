@@ -24,7 +24,7 @@ impl FakeRepo {
         let path = path.into();
         let mut snapshot = RepoSnapshot::stub(path.clone());
         snapshot.probed_at = SystemTime::now();
-        snapshot.remotes = vec![Remote { name: "origin".to_string(), host: None }];
+        snapshot.remotes = vec![Remote { name: "origin".to_string(), host: None, web: None }];
         Self {
             per_worktree_dir: path.join(".git"),
             snapshot,

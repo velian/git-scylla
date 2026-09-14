@@ -99,7 +99,7 @@ async fn every_repository_gets_the_name_derived_from_its_own_tags() {
     let tmp = tempfile::tempdir().unwrap();
     let (_, fresh) = repo(tmp.path(), "fresh", &[]);
     let (_, released) = repo(tmp.path(), "released", &["v2.3.7"]);
-    let (_, underway) = repo(tmp.path(), "underway", &["v1.9.0", "v1.10.0-dev.2"]);
+    let (_, underway) = repo(tmp.path(), "underway", &["v1.9.0", "v1.10.0-dev2"]);
     let root = fresh.parent().unwrap().to_path_buf();
 
     let engine = Engine::start(config());
@@ -108,18 +108,18 @@ async fn every_repository_gets_the_name_derived_from_its_own_tags() {
     let plan = h.plan(dev_tag(Some("origin")), Selection::All).await.unwrap();
     assert_eq!(plan.eligible.len(), 3, "{:?}", plan.skipped);
 
-    assert!(command_for(&plan, "fresh").contains("v0.1.0-dev.1"));
-    assert!(command_for(&plan, "released").contains("v2.4.0-dev.1"));
+    assert!(command_for(&plan, "fresh").contains("v0.1.0-dev0"));
+    assert!(command_for(&plan, "released").contains("v2.4.0-dev0"));
     // Ten, not two: the arithmetic is over numbers, and a string sort would
     // have said `v1.9.0` was the newest release here.
-    assert!(command_for(&plan, "underway").contains("v1.10.0-dev.3"));
+    assert!(command_for(&plan, "underway").contains("v1.10.0-dev3"));
 
     let jobs = run(&h, plan).await;
     assert!(jobs.iter().all(|j| j.state == JobState::Ok), "{jobs:#?}");
 
     // On the remote, which is the half that matters, and locally too.
     for (path, tag) in
-        [(&fresh, "v0.1.0-dev.1"), (&released, "v2.4.0-dev.1"), (&underway, "v1.10.0-dev.3")]
+        [(&fresh, "v0.1.0-dev0"), (&released, "v2.4.0-dev0"), (&underway, "v1.10.0-dev3")]
     {
         assert_eq!(git(path, &["tag", "-l", tag]), tag, "{tag} is not local");
         let origin = path
@@ -135,12 +135,12 @@ async fn every_repository_gets_the_name_derived_from_its_own_tags() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_name_the_remote_already_has_leaves_nothing_behind() {
-    // The test the step order exists for. The remote has `v2.4.0-dev.1` at a
+    // The test the step order exists for. The remote has `v2.4.0-dev0` at a
     // commit this repository does not know about, and its local tag list does
     // not — so the derivation picks a name that is taken.
     //
     // With the ordinary order (`tag` then `push`) this would leave a local
-    // `v2.4.0-dev.1` at the wrong commit, and every later derivation would skip
+    // `v2.4.0-dev0` at the wrong commit, and every later derivation would skip
     // past it while the two silently disagreed for ever.
     let tmp = tempfile::tempdir().unwrap();
     let (origin, clone) = repo(tmp.path(), "r0", &["v2.3.7"]);
@@ -150,22 +150,22 @@ async fn a_name_the_remote_already_has_leaves_nothing_behind() {
     git(tmp.path(), &["clone", origin.to_str().unwrap(), other.to_str().unwrap()]);
     std::fs::write(other.join("a.txt"), "theirs\n").unwrap();
     git(&other, &["commit", "-am", "theirs"]);
-    git(&other, &["push", "origin", "HEAD:refs/tags/v2.4.0-dev.1"]);
+    git(&other, &["push", "origin", "HEAD:refs/tags/v2.4.0-dev0"]);
 
     let root = clone.parent().unwrap().to_path_buf();
     let engine = Engine::start(config());
     let h = engine.handle();
     h.scan_to_completion(vec![root], false).await.unwrap();
     let plan = h.plan(dev_tag(Some("origin")), Selection::All).await.unwrap();
-    assert!(command_for(&plan, "r0").contains("v2.4.0-dev.1"));
+    assert!(command_for(&plan, "r0").contains("v2.4.0-dev0"));
 
     let jobs = run(&h, plan).await;
     assert!(matches!(jobs[0].state, JobState::Failed { .. }), "{:?}", jobs[0].state);
 
     // Nothing local. This is the whole point of publishing first.
-    assert_eq!(git(&clone, &["tag", "-l", "v2.4.0-dev.1"]), "");
+    assert_eq!(git(&clone, &["tag", "-l", "v2.4.0-dev0"]), "");
     // And the remote still has the other person's tag, untouched.
-    assert_eq!(git(&origin, &["rev-parse", "v2.4.0-dev.1"]), git(&other, &["rev-parse", "HEAD"]));
+    assert_eq!(git(&origin, &["rev-parse", "v2.4.0-dev0"]), git(&other, &["rev-parse", "HEAD"]));
 
     // The failure says what to do, and does not send the user to `pull`.
     let log = h.job_log(jobs[0].id).await.unwrap();
@@ -193,7 +193,7 @@ async fn re_running_after_a_partial_batch_is_harmless() {
     // Second time round the local tag exists, so the derivation moves on rather
     // than colliding with itself.
     let plan = h.plan(dev_tag(Some("origin")), Selection::All).await.unwrap();
-    assert!(command_for(&plan, "r0").contains("v2.4.0-dev.2"), "{}", command_for(&plan, "r0"));
+    assert!(command_for(&plan, "r0").contains("v2.4.0-dev1"), "{}", command_for(&plan, "r0"));
     let jobs = run(&h, plan).await;
     assert_eq!(jobs[0].state, JobState::Ok, "{:#?}", jobs[0].log);
     engine.shutdown().await;
@@ -269,10 +269,10 @@ async fn a_local_only_tag_needs_no_remote() {
 
     let plan = h.plan(dev_tag(None), Selection::All).await.unwrap();
     assert_eq!(plan.eligible.len(), 1);
-    assert_eq!(command_for(&plan, "solo"), "git tag v0.1.0-dev.1");
+    assert_eq!(command_for(&plan, "solo"), "git tag v0.1.0-dev0");
     let jobs = run(&h, plan).await;
     assert_eq!(jobs[0].state, JobState::Ok, "{:#?}", jobs[0].log);
-    assert_eq!(git(&bare, &["tag", "-l"]), "v0.1.0-dev.1");
+    assert_eq!(git(&bare, &["tag", "-l"]), "v0.1.0-dev0");
     engine.shutdown().await;
 }
 
@@ -280,9 +280,9 @@ async fn a_local_only_tag_needs_no_remote() {
 async fn packed_tags_count() {
     // A repository that has been `git gc`-ed has no loose tag files at all. A
     // loose-only read would report a decade-old project as never released, and
-    // derive `v0.1.0-dev.1` over the top of its real history.
+    // derive `v0.1.0-dev0` over the top of its real history.
     let tmp = tempfile::tempdir().unwrap();
-    let (_, clone) = repo(tmp.path(), "r0", &["v2.3.7", "v2.4.0-dev.1"]);
+    let (_, clone) = repo(tmp.path(), "r0", &["v2.3.7", "v2.4.0-dev0"]);
     git(&clone, &["pack-refs", "--all"]);
     assert!(!clone.join(".git/refs/tags/v2.3.7").exists(), "the fixture is not packed");
 
@@ -290,7 +290,7 @@ async fn packed_tags_count() {
     let h = engine.handle();
     h.scan_to_completion(vec![clone.parent().unwrap().to_path_buf()], false).await.unwrap();
     let plan = h.plan(dev_tag(Some("origin")), Selection::All).await.unwrap();
-    assert!(command_for(&plan, "r0").contains("v2.4.0-dev.2"), "{}", command_for(&plan, "r0"));
+    assert!(command_for(&plan, "r0").contains("v2.4.0-dev1"), "{}", command_for(&plan, "r0"));
     engine.shutdown().await;
 }
 
@@ -299,7 +299,7 @@ async fn packed_tags_count() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_repository_that_cannot_be_read_gets_no_tag_name() {
     // **Not "it has no tags".** Reading `refs/tags` used to swallow its errors
-    // and return an empty list, and an empty list derives `dev.1` — so the plan
+    // and return an empty list, and an empty list derives `dev0` — so the plan
     // offered to cut a name this repository may have used years ago, in a
     // sentence the user had no way to doubt.
     //
@@ -319,7 +319,7 @@ async fn a_repository_that_cannot_be_read_gets_no_tag_name() {
 
     let plan = h.plan(dev_tag(None), Selection::All).await.unwrap();
     assert_eq!(plan.eligible.len(), 1, "{:?}", plan.skipped);
-    assert!(command_for(&plan, "readable").contains("v2.4.0-dev.1"));
+    assert!(command_for(&plan, "readable").contains("v2.4.0-dev0"));
 
     assert_eq!(plan.skipped.len(), 1);
     let (id, why) = &plan.skipped[0];

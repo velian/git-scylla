@@ -74,15 +74,19 @@ fn parse(tag: &str) -> Option<Parsed> {
     }
     let pre = match pre {
         None => Pre::None,
-        Some(pre) => match pre.rsplit_once('.') {
-            Some((channel, n)) => match n.parse::<u64>() {
-                Ok(n) if !channel.is_empty() => Pre::Series { channel: channel.to_string(), n },
-                _ => Pre::Other,
-            },
-            None => Pre::Other,
-        },
+        Some(pre) => series(pre).unwrap_or(Pre::Other),
     };
     Some(Parsed { v_prefix, version, pre })
+}
+
+fn series(pre: &str) -> Option<Pre> {
+    let digits = pre.len() - pre.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+    let (channel, n) = pre.split_at(pre.len() - digits);
+    let channel = channel.strip_suffix('.').unwrap_or(channel);
+    if channel.is_empty() {
+        return None;
+    }
+    Some(Pre::Series { channel: channel.to_string(), n: n.parse().ok()? })
 }
 
 pub fn next_dev_tag(tags: &[String], channel: &str, bump: Bump) -> String {
@@ -108,10 +112,10 @@ pub fn next_dev_tag(tags: &[String], channel: &str, bump: Bump) -> String {
             _ => None,
         })
         .max()
-        .map_or(1, |n| n + 1);
+        .map_or(0, |n| n + 1);
 
     let v_prefix = newest_in_series.or(newest_release).is_none_or(|p| p.v_prefix);
-    format!("{}{target}-{channel}.{n}", if v_prefix { "v" } else { "" })
+    format!("{}{target}-{channel}{n}", if v_prefix { "v" } else { "" })
 }
 
 fn series_n(p: &Parsed) -> u64 {
@@ -135,67 +139,73 @@ mod tests {
 
     #[test]
     fn the_first_dev_tag_after_a_release_starts_the_next_series() {
-        assert_eq!(next(&["v2.3.7"]), "v2.4.0-dev.1");
+        assert_eq!(next(&["v2.3.7"]), "v2.4.0-dev0");
     }
 
     #[test]
     fn a_series_already_under_way_carries_on() {
-        assert_eq!(next(&["v2.3.7", "v2.4.0-dev.1", "v2.4.0-dev.2"]), "v2.4.0-dev.3");
+        assert_eq!(next(&["v2.3.7", "v2.4.0-dev0", "v2.4.0-dev1"]), "v2.4.0-dev2");
+    }
+
+    #[test]
+    fn a_series_written_in_the_older_spelling_is_read_as_the_same_series() {
+        assert_eq!(next(&["v2.3.7", "v2.4.0-dev.2"]), "v2.4.0-dev3");
+        assert_eq!(next(&["v2.3.7", "v2.4.0-dev.2", "v2.4.0-dev3"]), "v2.4.0-dev4");
     }
 
     #[test]
     fn versions_are_ordered_as_numbers_not_as_strings() {
-        assert_eq!(next(&["v2.9.0", "v2.10.0"]), "v2.11.0-dev.1");
-        assert_eq!(next(&["v2.4.0-dev.9", "v2.4.0-dev.10", "v2.3.0"]), "v2.4.0-dev.11");
+        assert_eq!(next(&["v2.9.0", "v2.10.0"]), "v2.11.0-dev0");
+        assert_eq!(next(&["v2.4.0-dev9", "v2.4.0-dev10", "v2.3.0"]), "v2.4.0-dev11");
     }
 
     #[test]
     fn a_series_ahead_of_the_bump_wins() {
-        assert_eq!(next(&["v2.3.7", "v3.0.0-dev.1"]), "v3.0.0-dev.2");
+        assert_eq!(next(&["v2.3.7", "v3.0.0-dev0"]), "v3.0.0-dev1");
     }
 
     #[test]
     fn a_release_ahead_of_the_series_wins_too() {
-        assert_eq!(next(&["v2.4.0-dev.1", "v2.4.0-dev.2", "v2.4.0"]), "v2.5.0-dev.1");
+        assert_eq!(next(&["v2.4.0-dev0", "v2.4.0-dev1", "v2.4.0"]), "v2.5.0-dev0");
     }
 
     #[test]
     fn the_bump_decides_where_a_new_series_starts() {
-        assert_eq!(next_dev_tag(&tags(&["v2.3.7"]), "dev", Bump::Major), "v3.0.0-dev.1");
-        assert_eq!(next_dev_tag(&tags(&["v2.3.7"]), "dev", Bump::Minor), "v2.4.0-dev.1");
-        assert_eq!(next_dev_tag(&tags(&["v2.3.7"]), "dev", Bump::Patch), "v2.3.8-dev.1");
+        assert_eq!(next_dev_tag(&tags(&["v2.3.7"]), "dev", Bump::Major), "v3.0.0-dev0");
+        assert_eq!(next_dev_tag(&tags(&["v2.3.7"]), "dev", Bump::Minor), "v2.4.0-dev0");
+        assert_eq!(next_dev_tag(&tags(&["v2.3.7"]), "dev", Bump::Patch), "v2.3.8-dev0");
     }
 
     #[test]
     fn channels_do_not_see_each_other() {
-        let have = tags(&["v2.3.7", "v2.4.0-dev.4", "v2.4.0-rc.1"]);
-        assert_eq!(next_dev_tag(&have, "dev", Bump::Minor), "v2.4.0-dev.5");
-        assert_eq!(next_dev_tag(&have, "rc", Bump::Minor), "v2.4.0-rc.2");
+        let have = tags(&["v2.3.7", "v2.4.0-dev4", "v2.4.0-rc1"]);
+        assert_eq!(next_dev_tag(&have, "dev", Bump::Minor), "v2.4.0-dev5");
+        assert_eq!(next_dev_tag(&have, "rc", Bump::Minor), "v2.4.0-rc2");
     }
 
     #[test]
     fn a_pre_release_in_another_shape_is_not_a_release() {
-        assert_eq!(next(&["v2.3.7", "v3.0.0-beta"]), "v2.4.0-dev.1");
-        assert_eq!(next(&["v2.3.7", "v3.0.0-rc1"]), "v2.4.0-dev.1");
+        assert_eq!(next(&["v2.3.7", "v3.0.0-beta"]), "v2.4.0-dev0");
+        assert_eq!(next(&["v2.3.7", "v3.0.0-4"]), "v2.4.0-dev0");
     }
 
     #[test]
     fn tags_that_are_not_versions_are_ignored() {
-        assert_eq!(next(&["release-2024-06", "latest", "v2.3.7", "1.2.3.4"]), "v2.4.0-dev.1");
+        assert_eq!(next(&["release-2024-06", "latest", "v2.3.7", "1.2.3.4"]), "v2.4.0-dev0");
     }
 
     #[test]
     fn a_repository_with_no_tags_gets_the_first_one() {
-        assert_eq!(next(&[]), "v0.1.0-dev.1");
-        assert_eq!(next_dev_tag(&[], "dev", Bump::Major), "v1.0.0-dev.1");
+        assert_eq!(next(&[]), "v0.1.0-dev0");
+        assert_eq!(next_dev_tag(&[], "dev", Bump::Major), "v1.0.0-dev0");
     }
 
     #[test]
     fn the_repositorys_own_prefix_convention_is_kept() {
-        assert_eq!(next(&["2.3.7"]), "2.4.0-dev.1");
-        assert_eq!(next(&["2.3.7", "2.4.0-dev.1"]), "2.4.0-dev.2");
-        assert_eq!(next(&["v2.3.7"]), "v2.4.0-dev.1");
-        assert_eq!(next(&["2.3.7", "v2.4.0-dev.1"]), "v2.4.0-dev.2");
+        assert_eq!(next(&["2.3.7"]), "2.4.0-dev0");
+        assert_eq!(next(&["2.3.7", "2.4.0-dev0"]), "2.4.0-dev1");
+        assert_eq!(next(&["v2.3.7"]), "v2.4.0-dev0");
+        assert_eq!(next(&["2.3.7", "v2.4.0-dev0"]), "v2.4.0-dev1");
     }
 
     #[test]
@@ -203,11 +213,12 @@ mod tests {
         let corpus: Vec<Vec<&str>> = vec![
             vec![],
             vec!["v1.0.0"],
-            vec!["v1.0.0", "v1.1.0-dev.1"],
-            vec!["v1.0.0", "v1.1.0-dev.1", "v1.1.0-dev.2", "v1.1.0"],
-            vec!["v0.9.0", "v0.10.0-dev.3", "v0.10.0-dev.11"],
-            vec!["2.3.7", "2.4.0-dev.1", "junk", "v9.9.9-beta"],
-            vec!["v1.2.3", "v1.2.3-dev.1", "v2.0.0-dev.1"],
+            vec!["v1.0.0", "v1.1.0-dev0"],
+            vec!["v1.0.0", "v1.1.0-dev0", "v1.1.0-dev1", "v1.1.0"],
+            vec!["v0.9.0", "v0.10.0-dev3", "v0.10.0-dev11"],
+            vec!["2.3.7", "2.4.0-dev0", "junk", "v9.9.9-beta"],
+            vec!["v1.2.3", "v1.2.3-dev0", "v2.0.0-dev0"],
+            vec!["v1.0.0", "v1.1.0-dev.1", "v1.1.0-dev1"],
         ];
         for have in corpus {
             for bump in [Bump::Major, Bump::Minor, Bump::Patch] {

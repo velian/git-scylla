@@ -11,6 +11,7 @@ const HOTKEYS: { keys: string; label: string }[][] = [
   [
     { keys: "t", label: "Open highlighted row in Terminal" },
     { keys: "o", label: "Open highlighted row in editor" },
+    { keys: "w", label: "Open highlighted row's page on the web" },
   ],
   [
     { keys: "⌘F", label: "Focus the filter" },

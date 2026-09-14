@@ -39,6 +39,7 @@ export default function App() {
   const [filterError, setFilterError] = useState<string | null>(null);
   const [sort, setSort] = useState<Sort>({ key: "badge", dir: "asc" });
   const filterBox = useRef<HTMLInputElement>(null);
+  const landing = useRef(false);
   const gridRef = useRef<GridHandle>(null);
   const [sheet, setSheet] = useState<Sheet | null>(null);
   const [planning, setPlanning] = useState(false);
@@ -339,6 +340,15 @@ export default function App() {
               placeholder="Filter — behind:>0 &amp; !dirty"
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
+              onMouseDown={(e) => {
+                landing.current = document.activeElement !== e.currentTarget;
+              }}
+              onFocus={(e) => e.currentTarget.select()}
+              onMouseUp={(e) => {
+                const landed = landing.current;
+                landing.current = false;
+                if (landed) e.preventDefault();
+              }}
               onKeyDown={(e) => {
                 if (e.key === "ArrowDown" || e.key === "Enter") {
                   e.preventDefault();

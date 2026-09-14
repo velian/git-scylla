@@ -130,7 +130,7 @@ export function ActionBar({
   ];
 
   const tags: Choice[] = (["dev", "rc"] as const).flatMap((channel) =>
-    (["Minor", "Major"] as const).map((bump) => ({
+    (["Patch", "Minor", "Major"] as const).map((bump) => ({
       label: `Cut ${channel} tag (${bump.toLowerCase()} bump)`,
       action: {
         type: "DevTag",

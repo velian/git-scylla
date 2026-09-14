@@ -284,6 +284,10 @@ pub struct Remote {
     /// Host parsed from the configured URL. `None` for a path remote or an
     /// unparseable URL.
     pub host: Option<String>,
+    /// The repository's page on that host, derived from the same URL. `None`
+    /// wherever `host` is, and for a URL that names no repository.
+    #[serde(default)]
+    pub web: Option<String>,
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -405,7 +409,7 @@ mod tests {
     fn no_remote_and_opted_out_are_different_states() {
         assert_eq!(snap().fetch_status(), FetchStatus::NoRemote);
         let mut s = snap();
-        s.remotes = vec![Remote { name: "origin".into(), host: None }];
+        s.remotes = vec![Remote { name: "origin".into(), host: None, web: None }];
         assert_eq!(s.fetch_status(), FetchStatus::Off);
     }
 

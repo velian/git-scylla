@@ -1,10 +1,12 @@
-//! Reading remote names and hosts out of `config`.
+//! Reading remote names, hosts and pages out of `config`.
 //!
-//! A file read rather than `git remote -v`, since the host is only a
-//! concurrency-bucket key for automatic fetching. Two consequences:
+//! A file read rather than `git remote -v`, since nothing derived here has to
+//! be exactly what git would resolve: the host is a concurrency-bucket key for
+//! automatic fetching, and the page is somewhere to send a browser. Two
+//! consequences:
 //!
 //! * `url.<base>.insteadOf` rewrites are not applied; a rewritten URL buckets
-//!   under the host it is written as.
+//!   under — and opens at — the host it is written as.
 //! * `[include]` / `[includeIf]` directives are not followed; a remote
 //!   defined only in an included file is invisible here.
 
@@ -34,7 +36,7 @@ pub(crate) fn parse_remotes_str(text: &str) -> Vec<Remote> {
             current = remote_name(section);
             if let Some(name) = &current {
                 if !out.iter().any(|r| &r.name == name) {
-                    out.push(Remote { name: name.clone(), host: None });
+                    out.push(Remote { name: name.clone(), host: None, web: None });
                 }
             }
             continue;
@@ -43,10 +45,11 @@ pub(crate) fn parse_remotes_str(text: &str) -> Vec<Remote> {
         let Some((key, value)) = line.split_once('=') else { continue };
         // `pushurl` is ignored: fetching is what buckets by host.
         if key.trim().eq_ignore_ascii_case("url") {
-            let host = host_of_url(unquote(value.trim()));
+            let url = unquote(value.trim());
             if let Some(r) = out.iter_mut().find(|r| &r.name == name) {
                 if r.host.is_none() {
-                    r.host = host;
+                    r.host = host_of_url(url);
+                    r.web = web_url(url);
                 }
             }
         }
@@ -109,6 +112,25 @@ pub fn host_of_url(url: &str) -> Option<String> {
     };
     normalise_host(hostpart)
 }
+pub fn web_url(url: &str) -> Option<String> {
+    let host = host_of_url(url)?;
+    let path = path_of_url(url)?.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path).trim_end_matches('/');
+    if path.is_empty() {
+        return None;
+    }
+    let host = if host.contains(':') { format!("[{host}]") } else { host };
+    Some(format!("https://{host}/{path}"))
+}
+
+fn path_of_url(url: &str) -> Option<&str> {
+    let url = url.trim();
+    if let Some((_, rest)) = url.split_once("://") {
+        let (_, path) = rest.split_once('/')?;
+        return Some(path.split(['?', '#']).next().unwrap_or(path));
+    }
+    Some(&url[url.find(':')? + 1..])
+}
 
 /// Strip a port and IPv6 brackets, and lowercase.
 fn normalise_host(hostport: &str) -> Option<String> {
@@ -159,6 +181,35 @@ mod tests {
     }
 
     #[test]
+    fn a_page_is_the_same_address_over_https() {
+        let web = |u| web_url(u).unwrap();
+        assert_eq!(web("git@github.com:o/r.git"), "https://github.com/o/r");
+        assert_eq!(web("github.com:o/r.git"), "https://github.com/o/r");
+        assert_eq!(web("https://github.com/o/r.git"), "https://github.com/o/r");
+        assert_eq!(web("https://github.com/o/r"), "https://github.com/o/r");
+        assert_eq!(web("http://gitea.example/o/r.git"), "https://gitea.example/o/r");
+        assert_eq!(web("ssh://git@host:2222/o/r.git"), "https://host/o/r");
+        assert_eq!(web("git@GitLab.com:group/sub/r.git"), "https://gitlab.com/group/sub/r");
+        assert_eq!(web("ssh://git@[::1]:22/o/r"), "https://[::1]/o/r");
+    }
+
+    #[test]
+    fn credentials_never_reach_the_page() {
+        assert_eq!(web_url("https://user:pw@host/o/r.git").unwrap(), "https://host/o/r");
+    }
+
+    #[test]
+    fn a_url_that_names_no_repository_has_no_page() {
+        assert_eq!(web_url("/tmp/fixtures/origin.git"), None);
+        assert_eq!(web_url("file:///tmp/o.git"), None);
+        assert_eq!(web_url("https://github.com"), None);
+        assert_eq!(web_url("https://github.com/"), None);
+        assert_eq!(web_url("git@github.com:"), None);
+        assert_eq!(web_url("git@github.com:.git"), None);
+        assert_eq!(web_url(""), None);
+    }
+
+    #[test]
     fn reads_remote_stanzas() {
         let cfg = r#"
 [core]
@@ -175,6 +226,7 @@ mod tests {
         assert_eq!(remotes.len(), 2);
         assert_eq!(remotes[0].name, "origin");
         assert_eq!(remotes[0].host.as_deref(), Some("github.com"));
+        assert_eq!(remotes[0].web.as_deref(), Some("https://github.com/o/r"));
         assert_eq!(remotes[1].name, "upstream");
         assert_eq!(remotes[1].host.as_deref(), Some("gitlab.example.com"));
     }
