@@ -81,6 +81,7 @@ pub fn plan(
     sel: &Selection,
     now: SystemTime,
     policy: &Policy,
+    routable: bool,
 ) -> PlanTemplate {
     let now_for_template = now;
     let mut eligible = Vec::new();
@@ -88,6 +89,10 @@ pub fn plan(
 
     for snap in snaps {
         if !sel.contains(snap) {
+            continue;
+        }
+        if let Some(why) = no_route(action, snap, routable) {
+            skipped.push((snap.id.clone(), why));
             continue;
         }
         match evaluate(action, snap, now, policy) {
@@ -104,6 +109,25 @@ pub fn plan(
         now,
         policy: policy.clone(),
     }
+}
+
+/// Refuse before running rather than forty times over.
+///
+/// A machine with no route off itself cannot reach a remote by any route git
+/// knows — proxy, jump host, VPN or ssh alias all need one — so the whole plan
+/// is answered by one question, asked once, in front of the user instead of in
+/// forty transcripts.
+///
+/// It is the *only* network question asked here, and never the other way
+/// round: a route that exists says nothing about whether anything answers, and
+/// a plan that guessed "yes" would be refusing work git could have done. See
+/// [`crate::route`].
+///
+/// A repository whose remotes are all paths is left alone. It never needed a
+/// network, and `Remote::host` is already `None` for exactly those.
+fn no_route(action: &Action, snap: &RepoSnapshot, routable: bool) -> Option<SkipReason> {
+    let needs_one = action.is_network() && snap.has_remote_host();
+    (!routable && needs_one).then_some(SkipReason::NoNetwork)
 }
 
 fn warn_about(
@@ -744,7 +768,7 @@ mod tests {
     }
 
     fn plan_all(action: &Action, snaps: &[RepoSnapshot]) -> Plan {
-        plan(action, snaps, &Selection::All, NOW, &Policy::default()).plan
+        plan(action, snaps, &Selection::All, NOW, &Policy::default(), true).plan
     }
 
     fn answered(id: &RepoId, a: Option<Result<RefAnswer, RefError>>) -> RefAnswers {
@@ -761,7 +785,7 @@ mod tests {
         answer: Option<Result<RefAnswer, RefError>>,
     ) -> Result<Action, SkipReason> {
         let snaps = vec![snap];
-        let t = plan(&action, &snaps, &Selection::All, NOW, &Policy::default());
+        let t = plan(&action, &snaps, &Selection::All, NOW, &Policy::default(), true);
         assert_eq!(t.eligible().len(), 1, "the fixture must survive the first gate");
         let answers = answered(&snaps[0].id, answer);
         let p = resolve(t, &snaps, &answers);
@@ -777,6 +801,15 @@ mod tests {
             path: "/r/r/.git".into(),
             source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
         }
+    }
+
+    /// A repository whose remote is somewhere else — the only kind a missing
+    /// route can refuse.
+    fn hosted(name: &str) -> RepoSnapshot {
+        let mut s = on_branch(name, "main");
+        s.remotes =
+            vec![Remote { name: "origin".into(), host: Some("example.invalid".into()), web: None }];
+        s
     }
 
     fn on_branch(name: &str, branch: &str) -> RepoSnapshot {
@@ -877,6 +910,79 @@ mod tests {
     }
 
     #[test]
+    fn with_no_route_off_the_machine_a_network_plan_refuses_before_it_runs() {
+        // One question, asked once, in front of the user — rather than forty
+        // transcripts each discovering the same thing.
+        let snaps = [hosted("a"), hosted("b")];
+        let p = plan(
+            &Action::Fetch { prune: true, tags: false },
+            &snaps,
+            &Selection::All,
+            NOW,
+            &Policy::default(),
+            false,
+        )
+        .plan;
+        assert!(p.eligible.is_empty());
+        assert!(p.skipped.iter().all(|(_, why)| *why == SkipReason::NoNetwork), "{:?}", p.skipped);
+    }
+
+    #[test]
+    fn a_route_that_exists_is_not_read_as_a_promise() {
+        // The check is a fast "no", never a "yes": with a route, the plan is
+        // exactly the plan it would have been, and git gets to have the
+        // opinion that counts.
+        let snaps = [hosted("a")];
+        let each = |routable| {
+            plan(
+                &Action::Fetch { prune: true, tags: false },
+                &snaps,
+                &Selection::All,
+                NOW,
+                &Policy::default(),
+                routable,
+            )
+            .plan
+        };
+        assert_eq!(each(true).eligible.len(), 1);
+        assert_eq!(each(false).eligible.len(), 0);
+    }
+
+    #[test]
+    fn work_that_never_needed_a_network_is_not_gated_by_one() {
+        let mut dirty = hosted("a");
+        dirty.work.modified = 1;
+        let local = plan(
+            &Action::Stash { include_untracked: false },
+            std::slice::from_ref(&dirty),
+            &Selection::All,
+            NOW,
+            &Policy::default(),
+            false,
+        )
+        .plan;
+        assert_eq!(local.eligible.len(), 1, "a stash was refused for want of a network");
+
+        // Nor is a repository whose only remote is a path on this disk: it is
+        // reachable with the wifi off, and `host` is `None` for exactly those.
+        let on_disk = on_branch("b", "main");
+        assert!(on_disk.remotes.iter().all(|r| r.host.is_none()), "the fixture is not on disk");
+        let p = plan(
+            &Action::Fetch { prune: true, tags: false },
+            std::slice::from_ref(&on_disk),
+            &Selection::All,
+            NOW,
+            &Policy::default(),
+            false,
+        )
+        .plan;
+        assert!(
+            !p.skipped.iter().any(|(_, why)| *why == SkipReason::NoNetwork),
+            "a path remote was refused for want of a network"
+        );
+    }
+
+    #[test]
     fn a_dev_tag_name_comes_from_this_repositorys_own_tags() {
         let resolved = one(
             dev_tag_template(),
@@ -905,6 +1011,7 @@ mod tests {
             &Selection::All,
             NOW,
             &Policy::default(),
+            true,
         );
         assert!(queries_for(&t).is_empty());
     }
@@ -918,6 +1025,7 @@ mod tests {
             &Selection::All,
             NOW,
             &Policy::default(),
+            true,
         );
         let groups = queries_for(&t);
         assert_eq!(groups.len(), 1);
@@ -934,6 +1042,7 @@ mod tests {
             &Selection::All,
             NOW,
             &Policy::default(),
+            true,
         );
         let mut asked: Vec<String> = queries_for(&t)
             .into_iter()
@@ -958,6 +1067,7 @@ mod tests {
             &Selection::All,
             NOW,
             &Policy::default(),
+            true,
         );
         let json = serde_json::to_string(&t.plan).unwrap();
         let err = serde_json::from_str::<Plan>(&json).unwrap_err().to_string();
@@ -1063,9 +1173,15 @@ mod tests {
     fn the_header_notes_when_the_selection_narrowed_the_set() {
         let snaps = vec![tracked("a", 0, 3), tracked("b", 0, 3)];
         let sel = Selection::ids([snaps[0].id.clone()]);
-        let p =
-            plan(&Action::Pull { mode: PullMode::Rebase }, &snaps, &sel, NOW, &Policy::default())
-                .plan;
+        let p = plan(
+            &Action::Pull { mode: PullMode::Rebase },
+            &snaps,
+            &sel,
+            NOW,
+            &Policy::default(),
+            true,
+        )
+        .plan;
         assert_eq!(p.selected(), 1);
         assert_eq!(p.considered, 2);
         assert!(p.render().starts_with("Pull 1 repo (rebase) — 1 of 2 selected"), "{}", p.render());
@@ -1075,9 +1191,15 @@ mod tests {
     fn unselected_repositories_are_not_reported_as_skips() {
         let snaps: Vec<RepoSnapshot> = (0..50).map(|i| tracked(&format!("s{i}"), 0, 3)).collect();
         let sel = Selection::ids([snaps[0].id.clone()]);
-        let p =
-            plan(&Action::Pull { mode: PullMode::Rebase }, &snaps, &sel, NOW, &Policy::default())
-                .plan;
+        let p = plan(
+            &Action::Pull { mode: PullMode::Rebase },
+            &snaps,
+            &sel,
+            NOW,
+            &Policy::default(),
+            true,
+        )
+        .plan;
         assert_eq!(p.skipped.len(), 0);
         assert_eq!(p.eligible.len(), 1);
         assert!(!p.skipped.iter().any(|(_, r)| matches!(r, SkipReason::NotSelected)));
@@ -1190,6 +1312,7 @@ mod tests {
             &Selection::All,
             NOW + Duration::from_secs(60),
             &policy,
+            true,
         )
         .plan;
         assert_eq!(p.eligible.len(), 0);
@@ -1267,7 +1390,7 @@ mod tests {
         let mut times = Vec::new();
         for _ in 0..21 {
             let start = std::time::Instant::now();
-            let p = plan(&action, &snaps, &sel, NOW, &policy).plan;
+            let p = plan(&action, &snaps, &sel, NOW, &policy, true).plan;
             times.push(start.elapsed());
             assert_eq!(p.selected(), 100);
         }

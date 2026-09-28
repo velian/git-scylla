@@ -254,7 +254,14 @@ async fn an_unborn_repository_records_no_head_before() {
     assert_eq!(snaps.len(), 1);
 
     let action = Action::Commit { message: "first".into(), stage_all: true, no_verify: false };
-    let t = plan(&action, &snaps, &Selection::All, std::time::SystemTime::now(), &config().policy);
+    let t = plan(
+        &action,
+        &snaps,
+        &Selection::All,
+        std::time::SystemTime::now(),
+        &config().policy,
+        true,
+    );
     let p = git_scylla_engine::resolve(t, &snaps, &git_scylla_engine::RefAnswers::new());
     assert_eq!(p.eligible.len(), 1, "an unborn repository with content can commit");
 

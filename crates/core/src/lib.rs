@@ -24,8 +24,8 @@ pub use action::{
 };
 pub use badge::Badge;
 pub use detail::{RepoDetail, StashEntry, Tag};
-pub use explain::{explain, Explanation, FailureKind};
-pub use fetch::{FetchHealth, FetchSchedule, FetchStatus};
+pub use explain::{explain, looks_offline, Explanation, FailureKind};
+pub use fetch::{FetchHealth, FetchSchedule, FetchStatus, Network, Outage};
 pub use filter::{Filter, FilterError, Term};
 pub use id::{Oid, OidError, RepoId};
 pub use job::{Batch, BatchId, BatchSummary, Job, JobId, JobOrigin, JobState};

@@ -29,6 +29,14 @@ pub async fn get_snapshot(app: State<'_, App>) -> Result<Vec<RepoRow>> {
     Ok(app.engine.snapshot().await?.into_iter().map(RepoRow::from).collect())
 }
 
+/// Whether the engine currently believes this machine has a network. Read on
+/// mount and after dropped events, where the `NetworkChanged` that would have
+/// said so may be the one that was dropped.
+#[tauri::command]
+pub async fn get_network(app: State<'_, App>) -> Result<git_scylla_core::Network> {
+    Ok(app.engine.network().await?)
+}
+
 #[tauri::command]
 pub async fn select_repos(app: State<'_, App>, expr: String) -> Result<Vec<RepoId>> {
     let selection = Selection::parse(&expr, None)

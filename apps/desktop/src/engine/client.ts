@@ -11,6 +11,7 @@ import type {
   JobId,
   LogLine,
   MenuCommand,
+  Network,
   Placeholder,
   Plan,
   PlanSheet,
@@ -38,6 +39,8 @@ export const engine = {
   cancelScan: (id: ScanId): Promise<void> => invoke("cancel_scan", { id }),
 
   getSnapshot: (): Promise<RepoRow[]> => invoke("get_snapshot"),
+
+  getNetwork: (): Promise<Network> => invoke("get_network"),
 
   selectRepos: (expr: string): Promise<RepoId[]> => invoke("select_repos", { expr }),
 

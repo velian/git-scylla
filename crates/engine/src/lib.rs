@@ -4,6 +4,7 @@ pub mod engine;
 pub mod plan;
 pub mod policy;
 pub mod probe_traffic;
+pub mod route;
 pub mod runner;
 pub mod sched;
 pub mod selection;
@@ -17,5 +18,6 @@ pub use policy::{
     after_attempt, due, evaluate, jitter, manual_attempt, Attempt, Eligibility, FetchPolicy, Policy,
 };
 pub use probe_traffic::{ProbeTraffic, Why};
+pub use route::{FixedRoute, KernelRoutes, Route};
 pub use sched::{Launch, Limits, Scheduler, Ticket};
 pub use selection::Selection;

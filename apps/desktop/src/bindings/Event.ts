@@ -6,8 +6,9 @@ import type { JobId } from "./JobId";
 import type { JobOrigin } from "./JobOrigin";
 import type { JobState } from "./JobState";
 import type { LogLine } from "./LogLine";
+import type { Network } from "./Network";
 import type { RepoId } from "./RepoId";
 import type { RepoSnapshot } from "./RepoSnapshot";
 import type { ScanId } from "./ScanId";
 
-export type Event = { "type": "ReposUpserted", "value": Array<RepoSnapshot> } | { "type": "ReposRemoved", "value": Array<RepoId> } | { "type": "ScanProgress", "value": { scan: ScanId, found: number, probed: number, } } | { "type": "ScanDone", "value": { scan: ScanId, errors: Array<DiscoveryError>, } } | { "type": "JobStateChanged", "value": { id: JobId, batch: BatchId | null, origin: JobOrigin, repo: RepoId, state: JobState, } } | { "type": "JobLogAppended", "value": { id: JobId, lines: Array<LogLine>, } } | { "type": "BatchDone", "value": { id: BatchId, summary: BatchSummary, } } | { "type": "Lagged" };
+export type Event = { "type": "ReposUpserted", "value": Array<RepoSnapshot> } | { "type": "ReposRemoved", "value": Array<RepoId> } | { "type": "ScanProgress", "value": { scan: ScanId, found: number, probed: number, } } | { "type": "ScanDone", "value": { scan: ScanId, errors: Array<DiscoveryError>, } } | { "type": "JobStateChanged", "value": { id: JobId, batch: BatchId | null, origin: JobOrigin, repo: RepoId, state: JobState, } } | { "type": "JobLogAppended", "value": { id: JobId, lines: Array<LogLine>, } } | { "type": "BatchDone", "value": { id: BatchId, summary: BatchSummary, } } | { "type": "NetworkChanged", "value": Network } | { "type": "Lagged" };

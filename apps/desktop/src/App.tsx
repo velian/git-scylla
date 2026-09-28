@@ -19,6 +19,7 @@ import type {
   Placeholder,
   JobId,
   MenuCommand,
+  Network,
   PlanSheet as Sheet,
   RepoId,
   Selection,
@@ -38,6 +39,7 @@ export default function App() {
   const [matching, setMatching] = useState<Set<RepoId> | null>(null);
   const [filterError, setFilterError] = useState<string | null>(null);
   const [sort, setSort] = useState<Sort>({ key: "badge", dir: "asc" });
+  const [network, setNetwork] = useState<Network>({ type: "Up" });
   const filterBox = useRef<HTMLInputElement>(null);
   const landing = useRef(false);
   const gridRef = useRef<GridHandle>(null);
@@ -67,12 +69,23 @@ export default function App() {
       if (!live) return;
       setBatches((prev) => jobs.apply(prev, events, Date.now()));
       scan.apply(events);
+      for (const event of events) {
+        if (event.type === "Engine" && event.value.type === "NetworkChanged") {
+          setNetwork(event.value.value);
+        }
+      }
     });
     return () => {
       live = false;
       pending.then((unlisten) => unlisten());
     };
   }, [scan.apply]);
+
+  // A dropped `NetworkChanged` would leave the banner lying in either
+  // direction, so the verdict is re-read rather than trusted.
+  useEffect(() => {
+    engine.getNetwork().then(setNetwork).catch(report);
+  }, [lagged, report]);
 
   useEffect(() => {
     if (filter.trim() === "") {
@@ -332,6 +345,14 @@ export default function App() {
         </aside>
         <main className="content">
           {failure && <p className="error">{failure}</p>}
+          {network.type === "Down" && (
+            <p className="notice">
+              {network.value.cause === "NoRoute"
+                ? "No network. Automatic fetching is paused until one comes back."
+                : "Nothing is reachable. Automatic fetching is paused, and one repository is retried at intervals to see whether it is back."}{" "}
+              Nothing will be quarantined for it.
+            </p>
+          )}
           {blocked.length > 0 && <FullDiskAccessHint roots={blocked} onFail={report} />}
           <div className="toolbar">
             <input

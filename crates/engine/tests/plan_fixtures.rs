@@ -50,6 +50,7 @@ async fn a_pull_plan_over_the_fixture_set() {
             &Selection::All,
             SystemTime::now(),
             &policy(),
+            true,
         ),
         &snaps,
     );
@@ -85,6 +86,7 @@ async fn a_fetch_plan_covers_every_fixture_with_a_remote() {
             &Selection::All,
             SystemTime::now(),
             &policy(),
+            true,
         ),
         &snaps,
     );
@@ -103,7 +105,14 @@ async fn a_filter_selection_narrows_the_plan_and_the_header_says_so() {
 
     let sel = Selection::parse("behind:>0", None).unwrap();
     let p = finish(
-        plan(&Action::Pull { mode: PullMode::Rebase }, &snaps, &sel, SystemTime::now(), &policy()),
+        plan(
+            &Action::Pull { mode: PullMode::Rebase },
+            &snaps,
+            &sel,
+            SystemTime::now(),
+            &policy(),
+            true,
+        ),
         &snaps,
     );
 
@@ -138,6 +147,7 @@ async fn planning_the_fixture_set_is_free_even_after_probing_it_was_not() {
                 &sel,
                 SystemTime::now(),
                 &policy,
+                true,
             ),
             &snaps,
         );

@@ -17,6 +17,8 @@ pub enum SkipReason {
     BareRepo,
     Diverged,
     NoRemote,
+    /// This machine has no route off itself, so nothing with a remote can run.
+    NoNetwork,
     SnapshotStale,
     NotSelected,
     RefNotFound(String),
@@ -42,6 +44,7 @@ impl std::fmt::Display for SkipReason {
             SkipReason::BareRepo => f.write_str("bare repository"),
             SkipReason::Diverged => f.write_str("diverged from upstream"),
             SkipReason::NoRemote => f.write_str("no remote configured"),
+            SkipReason::NoNetwork => f.write_str("no network on this machine"),
             SkipReason::SnapshotStale => f.write_str("status is out of date; refresh first"),
             SkipReason::NotSelected => f.write_str("not selected"),
             SkipReason::RefNotFound(r) => write!(f, "no such ref: {r}"),
@@ -74,6 +77,7 @@ mod tests {
             SkipReason::BareRepo,
             SkipReason::Diverged,
             SkipReason::NoRemote,
+            SkipReason::NoNetwork,
             SkipReason::SnapshotStale,
             SkipReason::NotSelected,
             SkipReason::RefNotFound("refs/heads/nope".into()),
@@ -88,7 +92,7 @@ mod tests {
     fn every_variant_is_covered_by_the_test_corpus() {
         let seen: std::collections::HashSet<_> =
             all_reasons().iter().map(std::mem::discriminant).collect();
-        assert_eq!(seen.len(), 17, "SkipReason has a variant with no test coverage");
+        assert_eq!(seen.len(), 18, "SkipReason has a variant with no test coverage");
     }
 
     #[test]

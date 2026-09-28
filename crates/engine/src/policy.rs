@@ -12,8 +12,8 @@
 //!   history, and the background scheduler consults this same function.
 
 use git_scylla_core::{
-    Action, FetchHealth, FetchSchedule, Head, PullMode, RepoId, RepoKind, RepoSnapshot, SkipReason,
-    SyncPlan,
+    Action, FetchHealth, FetchSchedule, Head, Network, Outage, PullMode, RepoId, RepoKind,
+    RepoSnapshot, SkipReason, SyncPlan,
 };
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime};
@@ -309,6 +309,17 @@ pub struct FetchPolicy {
     #[serde(with = "backoff_serde")]
     pub backoff: [Duration; 4],
     pub quarantine_after: u32,
+    /// Consecutive fetches that failed because the machine could not get out,
+    /// with nothing succeeding in between, before automatic fetching is held.
+    ///
+    /// Two rather than one: a single remote whose host does not resolve looks
+    /// the same as no network, and in a working set of any size it is
+    /// interrupted by everything that still works.
+    pub offline_after: u32,
+    /// How often, while held, one repository is asked whether the machine is
+    /// back.
+    #[serde(with = "git_scylla_core::serde_duration")]
+    pub recheck: Duration,
     pub enabled: bool,
 }
 
@@ -324,6 +335,8 @@ impl Default for FetchPolicy {
                 Duration::from_secs(2 * 60 * 60),
             ],
             quarantine_after: 5,
+            offline_after: 2,
+            recheck: Duration::from_secs(60),
             enabled: true,
         }
     }
@@ -437,6 +450,154 @@ pub fn manual_attempt(
         schedule: FetchSchedule::Due(now),
     };
     after_attempt(&cleared, id, now, outcome, fetch)
+}
+
+/// The verdict on the machine's own network.
+///
+/// Two independent facts, and the verdict is down while either holds:
+///
+/// * **No route off the machine** ([`crate::route`]) — proved locally, in a
+///   fifth of a millisecond, and unproved the same way the moment a route is
+///   back. Nothing has to be run to find out.
+/// * **Nothing reachable** — learned from fetches that already ran, which is
+///   the only evidence that can catch a network with a route and no service:
+///   dead DNS, a captive portal, a VPN half up. Only a fetch that reaches
+///   something can clear it, because only a fetch could have found it.
+///
+/// Each fact is set and cleared only by its own evidence, which is what stops
+/// a returning route from declaring a captive portal solved.
+///
+/// Only fetches from a remote *host* are evidence. A path remote succeeds with
+/// the wifi off, and letting it vote would lift a verdict it knows nothing
+/// about.
+#[derive(Debug, Clone, Default)]
+pub struct Reachability {
+    no_route_since: Option<SystemTime>,
+    unreachable: Option<Held>,
+    /// Hosted fetches that looked like no network, since the last that did not.
+    misses: u32,
+}
+
+/// The "nothing reachable" fact, while it holds.
+#[derive(Debug, Clone, Copy)]
+struct Held {
+    since: SystemTime,
+    /// When a repository was last asked whether the machine is back. Starts at
+    /// `since`: the fetches that established the verdict were the first ask.
+    asked: SystemTime,
+}
+
+/// One finished fetch from a remote host, as the verdict sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reached {
+    /// It worked, or it failed in a way only a reachable remote can fail.
+    Yes,
+    /// It failed saying the machine could not get out. See
+    /// [`git_scylla_core::looks_offline`].
+    No,
+}
+
+impl Reachability {
+    pub fn verdict(&self) -> Network {
+        match (self.no_route_since, self.unreachable) {
+            (None, None) => Network::Up,
+            // No route is the stronger statement: nothing is tried at all, so
+            // there is no recheck to tell anyone about.
+            (Some(t), held) => {
+                Network::Down { since: held.map_or(t, |h| h.since.min(t)), cause: Outage::NoRoute }
+            }
+            (None, Some(h)) => Network::Down { since: h.since, cause: Outage::Unreachable },
+        }
+    }
+
+    pub fn is_down(&self) -> bool {
+        self.verdict().is_down()
+    }
+
+    /// Whether the routing table had a way off this machine when last asked.
+    pub fn routable(&self) -> bool {
+        self.no_route_since.is_none()
+    }
+
+    /// What the routing table says now. Conclusive both ways for its own
+    /// fact, and silent on the other.
+    pub fn saw_route(&mut self, now: SystemTime, exists: bool) {
+        self.no_route_since = if exists { None } else { self.no_route_since.or(Some(now)) };
+    }
+
+    /// Fold in one finished fetch from a remote host.
+    pub fn saw_fetch(&mut self, now: SystemTime, reached: Reached, fetch: &FetchPolicy) {
+        match reached {
+            Reached::Yes => {
+                self.misses = 0;
+                self.unreachable = None;
+            }
+            // A missing route already explains it, and counting it would
+            // leave a verdict behind that outlives the route coming back.
+            Reached::No if self.no_route_since.is_some() => {}
+            Reached::No => {
+                self.misses = self.misses.saturating_add(1);
+                if self.misses >= fetch.offline_after.max(1) && self.unreachable.is_none() {
+                    self.unreachable = Some(Held { since: now, asked: now });
+                }
+            }
+        }
+    }
+
+    /// Which of the due repositories may start a background fetch now.
+    ///
+    /// A repository whose remotes are all paths always may: it never needed a
+    /// network. Of the rest, all may when the verdict is up and none may with
+    /// no route. With a route and nothing reachable, one may per recheck
+    /// interval — holding every one would be a stop rather than a pause,
+    /// since nothing else tells the app that DNS came back.
+    pub fn admit(
+        &mut self,
+        now: SystemTime,
+        due: &[&RepoSnapshot],
+        fetch: &FetchPolicy,
+    ) -> Vec<RepoId> {
+        let recheck = match (self.no_route_since, &mut self.unreachable) {
+            (None, None) => return due.iter().map(|s| s.id.clone()).collect(),
+            (Some(_), _) => None,
+            (None, Some(held)) => {
+                let waited = now.duration_since(held.asked).unwrap_or_default() >= fetch.recheck;
+                let pick = if waited { longest_unasked(due) } else { None };
+                if pick.is_some() {
+                    held.asked = now;
+                }
+                pick
+            }
+        };
+        due.iter()
+            .filter(|s| !s.has_remote_host() || Some(&s.id) == recheck.as_ref())
+            .map(|s| s.id.clone())
+            .collect()
+    }
+}
+
+/// Which repository answers the recheck: the hosted one asked longest ago.
+///
+/// It rotates rather than picking a favourite because the question is about
+/// the *machine*, and any repository can answer it — while a repository whose
+/// own remote is broken would answer "no" for ever and hold the rest behind
+/// it. A repository never yet attempted goes first: `None` sorts first.
+fn longest_unasked(due: &[&RepoSnapshot]) -> Option<RepoId> {
+    due.iter()
+        .filter(|s| s.has_remote_host())
+        .min_by_key(|s| s.fetch.last_attempt)
+        .map(|s| s.id.clone())
+}
+
+/// A fetch that failed while the machine itself could not get out.
+///
+/// Nothing was asked of the repository, so nothing is concluded about it: the
+/// schedule and the failure count are left exactly as they were, and only the
+/// attempt is recorded. Quarantine is for a repository that keeps refusing —
+/// spending its budget on a closed laptop lid would silence it for reasons it
+/// had no part in, and leave the user to restart each one by hand.
+pub fn offline_attempt(health: &FetchHealth, now: SystemTime) -> FetchHealth {
+    FetchHealth { last_attempt: Some(now), ..health.clone() }
 }
 
 mod backoff_serde {
@@ -1148,5 +1309,271 @@ mod fetch_schedule {
         let p = FetchPolicy::default();
         let json = serde_json::to_string(&p).unwrap();
         assert_eq!(serde_json::from_str::<FetchPolicy>(&json).unwrap(), p, "{json}");
+    }
+}
+
+#[cfg(test)]
+mod reachability {
+    use super::*;
+    use git_scylla_core::{FetchHealth, FetchSchedule, Remote, Upstream};
+
+    const T0: SystemTime = SystemTime::UNIX_EPOCH;
+
+    fn at(secs: u64) -> SystemTime {
+        T0 + Duration::from_secs(secs)
+    }
+
+    fn repo(name: &str, last_attempt: Option<SystemTime>) -> RepoSnapshot {
+        let mut s = RepoSnapshot::stub(format!("/work/{name}"));
+        s.upstream = Some(Upstream {
+            remote: "origin".into(),
+            remote_ref: "origin/main".into(),
+            sync: None,
+            last_fetch: None,
+        });
+        s.remotes =
+            vec![Remote { name: "origin".into(), host: Some("example.invalid".into()), web: None }];
+        s.fetch =
+            FetchHealth { last_attempt, last_success: None, schedule: FetchSchedule::Due(T0) };
+        s
+    }
+
+    /// A repository whose only remote is a path on this disk.
+    fn on_disk(name: &str, last_attempt: Option<SystemTime>) -> RepoSnapshot {
+        let mut s = repo(name, last_attempt);
+        s.remotes[0].host = None;
+        s
+    }
+
+    fn down(since: SystemTime, cause: Outage) -> Network {
+        Network::Down { since, cause }
+    }
+
+    /// Two hosted fetches that could not get out: enough, by default, to put
+    /// the verdict down as `Unreachable` at `t`.
+    fn unreachable_at(t: SystemTime) -> Reachability {
+        let p = FetchPolicy::default();
+        let mut net = Reachability::default();
+        net.saw_fetch(t, Reached::No, &p);
+        net.saw_fetch(t, Reached::No, &p);
+        assert_eq!(net.verdict(), down(t, Outage::Unreachable));
+        net
+    }
+
+    fn names(ids: &[RepoId]) -> Vec<&str> {
+        ids.iter().map(|id| id.name()).collect()
+    }
+
+    #[test]
+    fn one_unreachable_fetch_is_not_yet_a_verdict_about_the_machine() {
+        // A single remote whose host does not resolve looks exactly like a
+        // closed lid, and is far more common.
+        let mut net = Reachability::default();
+        net.saw_fetch(at(0), Reached::No, &FetchPolicy::default());
+        assert_eq!(net.verdict(), Network::Up);
+    }
+
+    #[test]
+    fn nothing_reachable_twice_over_holds_fetching() {
+        let p = FetchPolicy::default();
+        let mut net = Reachability::default();
+        net.saw_fetch(at(0), Reached::No, &p);
+        net.saw_fetch(at(10), Reached::No, &p);
+        assert_eq!(net.verdict(), down(at(10), Outage::Unreachable));
+        // Still down, and still down *since* the same moment.
+        net.saw_fetch(at(20), Reached::No, &p);
+        assert_eq!(net.verdict(), down(at(10), Outage::Unreachable));
+    }
+
+    #[test]
+    fn reaching_anything_at_all_releases_it() {
+        let mut net = unreachable_at(at(0));
+        net.saw_fetch(at(20), Reached::Yes, &FetchPolicy::default());
+        assert_eq!(net.verdict(), Network::Up);
+    }
+
+    #[test]
+    fn a_success_in_between_means_the_run_never_happened() {
+        let p = FetchPolicy::default();
+        let mut net = Reachability::default();
+        net.saw_fetch(at(0), Reached::No, &p);
+        net.saw_fetch(at(1), Reached::Yes, &p);
+        net.saw_fetch(at(2), Reached::No, &p);
+        assert_eq!(net.verdict(), Network::Up, "one bad remote among good ones is not an outage");
+    }
+
+    #[test]
+    fn a_missing_route_is_conclusive_on_its_own() {
+        // Nothing was run to find it out, so there is no second opinion to
+        // wait for and no failure to attribute to anybody.
+        let mut net = Reachability::default();
+        net.saw_route(at(0), false);
+        assert_eq!(net.verdict(), down(at(0), Outage::NoRoute));
+        net.saw_route(at(5), false);
+        assert_eq!(net.verdict(), down(at(0), Outage::NoRoute), "saying it twice is not news");
+        assert!(!net.routable());
+    }
+
+    #[test]
+    fn a_route_coming_back_lifts_what_a_missing_route_put_down() {
+        let mut net = Reachability::default();
+        net.saw_route(at(0), false);
+        net.saw_route(at(1), true);
+        assert_eq!(net.verdict(), Network::Up);
+    }
+
+    #[test]
+    fn a_route_coming_back_does_not_lift_what_git_found() {
+        // A captive portal has a perfectly good route. Believing the route
+        // meant it was fixed would send every repository at it again.
+        let mut net = unreachable_at(at(0));
+        net.saw_route(at(1), true);
+        assert_eq!(net.verdict(), down(at(0), Outage::Unreachable));
+
+        // Only a fetch that reached something can clear what a fetch found.
+        net.saw_fetch(at(2), Reached::Yes, &FetchPolicy::default());
+        assert_eq!(net.verdict(), Network::Up);
+    }
+
+    #[test]
+    fn with_both_facts_down_no_route_is_what_the_user_is_told() {
+        let mut net = unreachable_at(at(0));
+        net.saw_route(at(5), false);
+        assert_eq!(net.verdict(), down(at(0), Outage::NoRoute), "down since the earlier fact");
+        net.saw_route(at(9), true);
+        assert_eq!(net.verdict(), down(at(0), Outage::Unreachable));
+    }
+
+    #[test]
+    fn failures_with_no_route_are_already_explained() {
+        // Fetches in flight when the route went away fail offline. Counting
+        // them would leave an `Unreachable` behind that outlives the route.
+        let p = FetchPolicy::default();
+        let mut net = Reachability::default();
+        net.saw_route(at(0), false);
+        for t in 1..5 {
+            net.saw_fetch(at(t), Reached::No, &p);
+        }
+        net.saw_route(at(9), true);
+        assert_eq!(net.verdict(), Network::Up);
+    }
+
+    #[test]
+    fn up_admits_everything_that_is_due() {
+        let snaps = [repo("a", None), on_disk("b", None)];
+        let due: Vec<&RepoSnapshot> = snaps.iter().collect();
+        let mut net = Reachability::default();
+        assert_eq!(names(&net.admit(at(0), &due, &FetchPolicy::default())), ["a", "b"]);
+    }
+
+    #[test]
+    fn with_no_route_only_a_path_remote_is_admitted() {
+        // A clone from this disk is as reachable with the wifi off as on.
+        let snaps = [repo("a", None), on_disk("b", None), repo("c", None)];
+        let due: Vec<&RepoSnapshot> = snaps.iter().collect();
+        let mut net = Reachability::default();
+        net.saw_route(at(0), false);
+        for t in [0, 60, 600] {
+            assert_eq!(names(&net.admit(at(t), &due, &FetchPolicy::default())), ["b"]);
+        }
+    }
+
+    #[test]
+    fn unreachable_admits_path_remotes_and_one_recheck_per_interval() {
+        let p = FetchPolicy { recheck: Duration::from_secs(60), ..Default::default() };
+        let snaps = [repo("a", None), on_disk("b", None)];
+        let due: Vec<&RepoSnapshot> = snaps.iter().collect();
+        let mut net = unreachable_at(at(0));
+
+        // The fetches that put it down were the first ask; the next waits.
+        assert_eq!(names(&net.admit(at(30), &due, &p)), ["b"]);
+        assert_eq!(names(&net.admit(at(60), &due, &p)), ["a", "b"]);
+        assert_eq!(names(&net.admit(at(90), &due, &p)), ["b"]);
+        assert_eq!(names(&net.admit(at(120), &due, &p)), ["a", "b"]);
+    }
+
+    #[test]
+    fn a_recheck_with_nothing_hosted_due_is_not_spent() {
+        let p = FetchPolicy { recheck: Duration::from_secs(60), ..Default::default() };
+        let hosted = repo("a", None);
+        let mut net = unreachable_at(at(0));
+        assert!(net.admit(at(60), &[], &p).is_empty());
+        // The interval is still open, so the first hosted repository to come
+        // due answers it at once.
+        assert_eq!(names(&net.admit(at(61), &[&hosted], &p)), ["a"]);
+    }
+
+    #[test]
+    fn the_recheck_rotates_through_hosted_repositories() {
+        // Whichever was asked longest ago, so a repository whose own remote is
+        // broken cannot answer "no" for ever on everyone else's behalf.
+        let p = FetchPolicy { recheck: Duration::ZERO, ..Default::default() };
+        let pick = |snaps: &[RepoSnapshot]| {
+            let due: Vec<&RepoSnapshot> = snaps.iter().collect();
+            let mut net = unreachable_at(at(0));
+            let admitted = net.admit(at(100), &due, &p);
+            let hosted: Vec<&str> = snaps
+                .iter()
+                .filter(|s| s.has_remote_host() && admitted.contains(&s.id))
+                .map(|s| s.id.name())
+                .collect();
+            assert_eq!(hosted.len(), 1, "{admitted:?}");
+            hosted[0].to_string()
+        };
+
+        assert_eq!(
+            pick(&[repo("a", Some(at(30))), repo("b", Some(at(10))), repo("c", Some(at(20)))]),
+            "b"
+        );
+        assert_eq!(
+            pick(&[repo("a", Some(at(30))), repo("b", None)]),
+            "b",
+            "never asked goes first"
+        );
+        // A path remote can say nothing about the network, however long ago
+        // it was asked.
+        assert_eq!(pick(&[on_disk("a", None), repo("b", Some(at(50)))]), "b");
+    }
+
+    #[test]
+    fn an_offline_attempt_leaves_the_repository_exactly_as_it_was() {
+        // The whole point: nothing was asked of this repository, so its
+        // failure count does not move and it cannot reach quarantine.
+        let health = FetchHealth {
+            last_attempt: Some(at(0)),
+            last_success: Some(at(0)),
+            schedule: FetchSchedule::BackingOff { until: at(90), failures: 3 },
+        };
+        let after = offline_attempt(&health, at(60));
+        assert_eq!(after.schedule, health.schedule);
+        assert_eq!(after.last_success, health.last_success);
+        assert_eq!(after.last_attempt, Some(at(60)), "the attempt itself is still recorded");
+    }
+
+    #[test]
+    fn an_outage_of_any_length_never_quarantines_anything() {
+        // The failure the verdict was drawn from is the only one that counts,
+        // and one is a long way from `quarantine_after`.
+        let p = FetchPolicy::default();
+        let mut net = Reachability::default();
+        let mut health = FetchHealth::due_now(T0);
+        let id = repo("a", None).id;
+
+        let mut counted = 0;
+        for minute in 0..(24 * 60) {
+            let now = at(minute * 60);
+            net.saw_fetch(now, Reached::No, &p);
+            health = if net.is_down() {
+                offline_attempt(&health, now)
+            } else {
+                counted += 1;
+                after_attempt(&health, &id, now, Attempt::Failed("Could not resolve host"), &p)
+            };
+        }
+        assert_eq!(counted, 1, "only the fetch that established the verdict counted");
+        assert!(
+            !matches!(health.schedule, FetchSchedule::Quarantined { .. }),
+            "a day offline quarantined a repository: {health:?}"
+        );
     }
 }

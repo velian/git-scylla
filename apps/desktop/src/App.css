@@ -316,6 +316,16 @@ p {
   white-space: pre-wrap;
 }
 
+/* A transient condition worth a sentence, not a panel: the outage banner. */
+.notice {
+  border-left: 3px solid #ff9f0a;
+  padding: 8px 12px;
+  margin: 0 0 12px;
+  max-width: 62ch;
+  background: var(--line);
+  border-radius: 0 6px 6px 0;
+}
+
 .hint {
   border: 1px solid var(--line);
   border-left: 3px solid #ff9f0a;

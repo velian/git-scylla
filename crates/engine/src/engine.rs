@@ -2,14 +2,18 @@
 //! jobs, batches, scans, the scheduler, probe bookkeeping.
 
 use crate::plan::{plan, queries_for, Plan, PlanTemplate, RefAnswers};
-use crate::policy::{after_attempt, due, manual_attempt, Attempt, FetchPolicy, Policy};
+use crate::policy::{
+    after_attempt, due, manual_attempt, offline_attempt, Attempt, FetchPolicy, Policy,
+    Reachability, Reached,
+};
 use crate::probe_traffic::{ProbeTraffic, Why};
+use crate::route::{KernelRoutes, Route};
 use crate::runner::run_job;
 use crate::sched::{Limits, Permits, Scheduler, Ticket};
 use crate::Selection;
 use git_scylla_core::{
-    Action, Batch, BatchId, BatchSummary, FetchHealth, FetchSchedule, Job, JobId, JobOrigin,
-    JobState, LogLine, RepoId, RepoSnapshot, Stream,
+    looks_offline, Action, Batch, BatchId, BatchSummary, FetchHealth, FetchSchedule, Job, JobId,
+    JobOrigin, JobState, LogLine, Network, RepoId, RepoSnapshot, Stream,
 };
 use git_scylla_discovery::{DiscoveryError, RepoFound, WalkOptions, Walker};
 use git_scylla_probe::{GitCliProbe, Probe, ProbeRequest, RefQuery, RefRequest};
@@ -51,6 +55,7 @@ pub enum Cmd {
     SetWatched { covered: bool },
     SetFetchInterval { interval: Duration },
     Snapshot { reply: oneshot::Sender<Vec<RepoSnapshot>> },
+    Network { reply: oneshot::Sender<Network> },
     Select { sel: Selection, reply: oneshot::Sender<Vec<RepoId>> },
     JobLog { id: JobId, reply: oneshot::Sender<Vec<LogLine>> },
     Jobs { batch: BatchId, reply: oneshot::Sender<Vec<Job>> },
@@ -90,6 +95,9 @@ pub enum Event {
         id: BatchId,
         summary: BatchSummary,
     },
+    /// The verdict on this machine's network changed. While it is
+    /// `Network::Down`, automatic fetching is held.
+    NetworkChanged(Network),
     Lagged,
 }
 
@@ -109,6 +117,9 @@ pub struct Config {
     pub probe_timeout: Duration,
     pub extra_env: Vec<(OsString, OsString)>,
     pub fetch: FetchPolicy,
+    /// The seam to the routing table. Swapped in tests for a machine whose
+    /// network can be taken away without taking the test runner's away.
+    pub routes: Arc<dyn Route>,
     pub fetch_tick: Duration,
     pub background_history: usize,
     pub cache: CacheMode,
@@ -132,6 +143,7 @@ impl Default for Config {
             probe_timeout: Duration::from_secs(2),
             extra_env: Vec::new(),
             fetch: FetchPolicy::default(),
+            routes: Arc::new(KernelRoutes),
             fetch_tick: Duration::from_secs(30),
             background_history: 200,
             cache: CacheMode::Off,
@@ -215,6 +227,13 @@ impl EngineHandle {
 
     pub async fn snapshot(&self) -> Result<Vec<RepoSnapshot>, Gone> {
         self.ask(|reply| Cmd::Snapshot { reply }).await
+    }
+
+    /// The current verdict on this machine's network. Also the answer to
+    /// "why has nothing fetched", which a dropped `NetworkChanged` would
+    /// otherwise leave the caller guessing at.
+    pub async fn network(&self) -> Result<Network, Gone> {
+        self.ask(|reply| Cmd::Network { reply }).await
     }
 
     pub async fn select(&self, sel: Selection) -> Result<Vec<RepoId>, Gone> {
@@ -349,6 +368,8 @@ struct Actor {
 
     scan_settled: bool,
     background_done: VecDeque<JobId>,
+    /// Whether this machine can reach anything, folded from finished fetches.
+    network: Reachability,
 
     from_cache: HashSet<RepoId>,
     cache_served: bool,
@@ -386,6 +407,7 @@ impl Actor {
             watched: false,
             scan_settled: false,
             background_done: VecDeque::new(),
+            network: Reachability::default(),
             from_cache: HashSet::new(),
             cache_served: false,
             cache_dirty: false,
@@ -493,8 +515,11 @@ impl Actor {
             }
 
             Cmd::Plan { action, sel, reply } => {
+                let now = SystemTime::now();
+                self.observe_route(now);
                 let snaps = self.sorted_snapshots();
-                let t = plan(&action, &snaps, &sel, SystemTime::now(), &self.config.policy);
+                let t =
+                    plan(&action, &snaps, &sel, now, &self.config.policy, self.network.routable());
                 self.spawn_resolve(t, snaps, reply);
             }
 
@@ -550,6 +575,10 @@ impl Actor {
 
             Cmd::Snapshot { reply } => {
                 let _ = reply.send(self.sorted_snapshots());
+            }
+
+            Cmd::Network { reply } => {
+                let _ = reply.send(self.network.verdict());
             }
 
             Cmd::Select { sel, reply } => {
@@ -714,22 +743,48 @@ impl Actor {
     }
 
     fn fetch_due(&mut self) {
+        let now = SystemTime::now();
+        // Before anything that might skip the tick: the verdict is also what
+        // the user is shown, and it must not go stale because fetching is off.
+        self.observe_route(now);
+
         if !self.scan_settled || !self.config.fetch.enabled {
             return;
         }
         if self.user_batch_in_flight() {
             return;
         }
+
         let snaps = self.sorted_snapshots();
-        let due = due(SystemTime::now(), &snaps, &self.config.fetch, &self.config.policy);
-        for repo in due {
-            if self.sched.is_busy(&repo)
-                || self.queued_for(&repo)
-                || !self.found.contains_key(&repo)
-            {
-                continue;
-            }
+        let due: Vec<&RepoSnapshot> = due(now, &snaps, &self.config.fetch, &self.config.policy)
+            .into_iter()
+            .filter(|repo| {
+                !self.sched.is_busy(repo) && !self.queued_for(repo) && self.found.contains_key(repo)
+            })
+            .filter_map(|repo| self.snapshots.get(&repo))
+            .collect();
+        let admitted = self.network.admit(now, &due, &self.config.fetch);
+        for repo in admitted {
             self.start_background_fetch(repo);
+        }
+    }
+
+    /// Ask the routing table, which costs nothing and answers for the whole
+    /// machine. Asked before anything is spawned: with no route nothing runs,
+    /// so nothing fails, so there is no failure to attribute to a repository.
+    fn observe_route(&mut self, now: SystemTime) {
+        let exists = self.config.routes.exists();
+        self.observe_network(|n| n.saw_route(now, exists));
+    }
+
+    /// Change the network verdict, and say so if what the user is told about
+    /// it changed. The one place `NetworkChanged` is emitted.
+    fn observe_network(&mut self, see: impl FnOnce(&mut Reachability)) {
+        let before = self.network.verdict().outage();
+        see(&mut self.network);
+        let after = self.network.verdict();
+        if after.outage() != before {
+            self.emit(Event::NetworkChanged(after));
         }
     }
 
@@ -780,13 +835,32 @@ impl Actor {
             JobState::Failed { .. } => Attempt::Failed(first_error(job)),
             _ => return,
         };
-        let Some(snap) = self.snapshots.get(&job.repo) else { return };
+        let Some(hosted) = self.snapshots.get(&job.repo).map(RepoSnapshot::has_remote_host) else {
+            return;
+        };
         let now = SystemTime::now();
-        let health = match job.origin {
-            JobOrigin::User => {
+
+        // Only a remote host is evidence about the network. A path remote
+        // works with the wifi off, and letting it vote would lift a verdict it
+        // knows nothing about.
+        if hosted {
+            let reached = match outcome {
+                Attempt::Failed(_) if looks_offline(&job.log) => Reached::No,
+                _ => Reached::Yes,
+            };
+            let fetch = self.config.fetch.clone();
+            self.observe_network(|n| n.saw_fetch(now, reached, &fetch));
+        }
+
+        let Some(snap) = self.snapshots.get(&job.repo) else { return };
+        // A failure recorded while the machine cannot get out says nothing
+        // about this repository, so it is not allowed to spend its budget.
+        let health = match (hosted && self.network.is_down(), job.origin) {
+            (true, _) => offline_attempt(&snap.fetch, now),
+            (false, JobOrigin::User) => {
                 manual_attempt(&snap.fetch, &job.repo, now, outcome, &self.config.fetch)
             }
-            JobOrigin::Background => {
+            (false, JobOrigin::Background) => {
                 after_attempt(&snap.fetch, &job.repo, now, outcome, &self.config.fetch)
             }
         };

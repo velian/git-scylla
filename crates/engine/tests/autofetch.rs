@@ -1,9 +1,12 @@
 //! Automatic fetching, against the engine.
 
-use git_scylla_core::{Action, FetchSchedule, JobOrigin, JobState};
-use git_scylla_engine::{Config, Engine, EngineHandle, Event, FetchPolicy, Plan, Policy};
+use git_scylla_core::{Action, FetchSchedule, JobOrigin, JobState, Network, Outage, SkipReason};
+use git_scylla_engine::{
+    Config, Engine, EngineHandle, Event, FetchPolicy, FixedRoute, Plan, Policy, Selection,
+};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 
 fn git(cwd: &Path, args: &[&str]) {
@@ -48,6 +51,68 @@ fn world(dir: &Path, n: usize) -> World {
 }
 
 impl World {
+    /// Point every repository at a remote that fails the way a machine with no
+    /// network fails.
+    ///
+    /// `ext::` runs a command instead of opening a socket, so the outage is
+    /// real git output with no DNS, no socket and nothing to flake. Returns
+    /// the URLs it replaced, so the network can be brought back.
+    fn go_offline(&self) -> Vec<(PathBuf, String)> {
+        let script = self.dir.join("offline.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho \"ssh: connect to host git.example port 22: Network is unreachable\" >&2\nexit 128\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut was = Vec::new();
+        for repo in self.paths() {
+            let out = Command::new("git")
+                .args(["remote", "get-url", "origin"])
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            was.push((repo.clone(), String::from_utf8_lossy(&out.stdout).trim().to_string()));
+            git(&repo, &["remote", "set-url", "origin", &format!("ext::{}", script.display())]);
+        }
+        was
+    }
+
+    /// Give every repository a remote that reads as *somewhere else* while
+    /// still serving this disk.
+    ///
+    /// A clone from a path has no host, and a repository with no host is not
+    /// held for want of a network — correctly, since it never needed one. To
+    /// test what *is* held, the remotes have to look remote. `ext::` runs
+    /// git's own `upload-pack`, so these fetch for real.
+    fn hosted_remotes(&self) {
+        let origin = self.dir.join("origin.git");
+        for repo in self.paths() {
+            let url = format!("ext::git upload-pack {}", origin.display());
+            git(&repo, &["remote", "set-url", "origin", &url]);
+        }
+    }
+
+    fn come_back(&self, was: &[(PathBuf, String)]) {
+        for (repo, url) in was {
+            git(repo, &["remote", "set-url", "origin", url]);
+        }
+    }
+
+    fn paths(&self) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = std::fs::read_dir(&self.repos)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.is_dir())
+            .collect();
+        out.sort();
+        out
+    }
+
     fn advance(&self) {
         let seed = self.dir.join("scratch/seed");
         let n = std::fs::read_to_string(seed.join("a.txt")).unwrap().len();
@@ -62,6 +127,10 @@ fn config(interval: Duration) -> Config {
         extra_env: vec![
             ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
             ("GIT_CONFIG_SYSTEM".into(), "/dev/null".into()),
+            // For `World::go_offline`. Inert for every other test here.
+            ("GIT_CONFIG_COUNT".into(), "1".into()),
+            ("GIT_CONFIG_KEY_0".into(), "protocol.ext.allow".into()),
+            ("GIT_CONFIG_VALUE_0".into(), "always".into()),
         ],
         probe_timeout: Duration::from_secs(20),
         policy: Policy { max_snapshot_age: Duration::from_secs(86_400), ..Default::default() },
@@ -352,5 +421,306 @@ async fn background_transcripts_are_bounded() {
     let kept = h.background_jobs().await.unwrap();
     assert!(kept.len() <= 3, "kept {} background transcripts, bound is 3", kept.len());
     assert!(!kept.is_empty(), "the bound evicted everything");
+    engine.shutdown().await;
+}
+
+/// Count the background fetches the engine starts over `window`.
+async fn background_starts(h: &EngineHandle, window: Duration) -> usize {
+    let mut events = h.subscribe();
+    let mut started = 0;
+    let deadline = tokio::time::Instant::now() + window;
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return started;
+        }
+        match tokio::time::timeout(left, events.recv()).await {
+            Ok(Ok(Event::JobStateChanged {
+                origin: JobOrigin::Background,
+                state: JobState::Queued,
+                ..
+            })) => started += 1,
+            Ok(Ok(_)) => continue,
+            Ok(Err(_)) | Err(_) => return started,
+        }
+    }
+}
+
+/// Every `NetworkChanged` on `events` over `window`.
+async fn network_changes(
+    mut events: tokio::sync::broadcast::Receiver<Event>,
+    window: Duration,
+) -> Vec<Network> {
+    let mut seen = Vec::new();
+    let deadline = tokio::time::Instant::now() + window;
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return seen;
+        }
+        match tokio::time::timeout(left, events.recv()).await {
+            Ok(Ok(Event::NetworkChanged(n))) => seen.push(n),
+            Ok(Ok(_)) => continue,
+            Ok(Err(_)) | Err(_) => return seen,
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_network_stops_the_app_asking_again() {
+    // Forty repositories cannot each discover the same closed lid. Once one
+    // fetch has said the machine cannot get out, automatic fetching is held,
+    // and a single repository is asked at the recheck interval.
+    let tmp = tempfile::tempdir().unwrap();
+    let w = world(tmp.path(), 4);
+    w.go_offline();
+    let engine = Engine::start(Config {
+        fetch: FetchPolicy {
+            backoff: [Duration::from_millis(50); 4],
+            // High enough that nothing stops fetching by being quarantined —
+            // whatever holds it here has to be the outage.
+            quarantine_after: 1000,
+            recheck: Duration::from_secs(5),
+            ..config(Duration::from_millis(100)).fetch
+        },
+        ..config(Duration::from_millis(100))
+    });
+    let h = engine.handle();
+    h.scan_to_completion(vec![w.repos.clone()], false).await.unwrap();
+
+    let started = background_starts(&h, Duration::from_secs(3)).await;
+    assert!(started <= 8, "{started} fetches in three seconds with no network");
+    assert!(
+        h.snapshot().await.unwrap().iter().any(|s| s.fetch.last_attempt.is_some()),
+        "nothing was tried at all, so nothing could have learned the network was down"
+    );
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_network_never_quarantines_a_repository() {
+    // Quarantine is for a repository that keeps refusing, and it is the user
+    // who has to lift it — one per repository, by hand. Spending it on a
+    // closed lid would silence a whole working set for a reason none of them
+    // had any part in.
+    let tmp = tempfile::tempdir().unwrap();
+    let w = world(tmp.path(), 4);
+    w.go_offline();
+    let engine = Engine::start(Config {
+        fetch: FetchPolicy {
+            backoff: [Duration::from_millis(50); 4],
+            quarantine_after: 2,
+            recheck: Duration::from_millis(200),
+            ..config(Duration::from_millis(100)).fetch
+        },
+        ..config(Duration::from_millis(100))
+    });
+    let h = engine.handle();
+    h.scan_to_completion(vec![w.repos.clone()], false).await.unwrap();
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let snaps = h.snapshot().await.unwrap();
+    let quarantined: Vec<&str> = snaps
+        .iter()
+        .filter(|s| matches!(s.fetch.schedule, FetchSchedule::Quarantined { .. }))
+        .map(|s| s.id.name())
+        .collect();
+    assert!(quarantined.is_empty(), "the outage quarantined {quarantined:?}");
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fetching_resumes_when_the_network_comes_back() {
+    // Nothing tells the app the network returned, so it has to keep one
+    // question open: the recheck is the whole reason the hold is not a stop.
+    let tmp = tempfile::tempdir().unwrap();
+    let w = world(tmp.path(), 3);
+    let was = w.go_offline();
+    let engine = Engine::start(Config {
+        fetch: FetchPolicy {
+            // The one fetch that established the verdict counted, so that
+            // repository is backing off like any other failure. Short, so the
+            // test is not waiting out a minute of it.
+            backoff: [Duration::from_millis(50); 4],
+            recheck: Duration::from_millis(200),
+            ..config(Duration::from_millis(100)).fetch
+        },
+        ..config(Duration::from_millis(100))
+    });
+    let h = engine.handle();
+    h.scan_to_completion(vec![w.repos.clone()], false).await.unwrap();
+
+    assert!(
+        wait_for(&h, Duration::from_secs(10), |snaps| {
+            snaps.iter().filter(|s| s.fetch.last_attempt.is_some()).count() >= 2
+        })
+        .await,
+        "the outage was never noticed"
+    );
+
+    w.come_back(&was);
+    w.advance();
+
+    assert!(
+        wait_for(&h, Duration::from_secs(20), |snaps| {
+            snaps.iter().all(|s| s.fetch.last_success.is_some())
+        })
+        .await,
+        "fetching never resumed: {:#?}",
+        h.snapshot().await.unwrap().iter().map(|s| s.fetch.clone()).collect::<Vec<_>>()
+    );
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_no_route_off_the_machine_nothing_is_even_spawned() {
+    // The half a failed fetch cannot do: with no route there is nothing to
+    // learn from trying, so nothing is tried, and no repository ends up with a
+    // failure against its name for a fact about the machine.
+    let tmp = tempfile::tempdir().unwrap();
+    let w = world(tmp.path(), 4);
+    w.hosted_remotes();
+    let route = FixedRoute::new(false);
+    let engine = Engine::start(Config {
+        routes: Arc::new(route.clone()),
+        ..config(Duration::from_millis(100))
+    });
+    let h = engine.handle();
+    h.scan_to_completion(vec![w.repos.clone()], false).await.unwrap();
+
+    let started = background_starts(&h, Duration::from_secs(2)).await;
+    assert_eq!(started, 0, "{started} fetches were spawned with no route off the machine");
+
+    let snaps = h.snapshot().await.unwrap();
+    assert!(snaps.iter().all(|s| s.fetch.last_attempt.is_none()), "something was attempted anyway");
+    assert!(h.network().await.unwrap().is_down(), "the verdict never noticed");
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plan_refuses_once_rather_than_every_repository_failing() {
+    // What the user sees before confirming: one reason, on every row that
+    // needed a network, instead of forty transcripts of the same thing.
+    let tmp = tempfile::tempdir().unwrap();
+    let w = world(tmp.path(), 3);
+    w.hosted_remotes();
+    let engine = Engine::start(Config {
+        routes: Arc::new(FixedRoute::new(false)),
+        fetch: FetchPolicy { enabled: false, ..config(Duration::from_secs(900)).fetch },
+        ..config(Duration::from_secs(900))
+    });
+    let h = engine.handle();
+    h.scan_to_completion(vec![w.repos.clone()], false).await.unwrap();
+
+    let plan = h.plan(Action::Fetch { prune: true, tags: false }, Selection::All).await.unwrap();
+    assert!(plan.eligible.is_empty(), "a fetch was planned with no route");
+    // Automatic fetching is off, and the verdict still has to agree with the
+    // plan: it is what the user is shown as the reason.
+    assert_eq!(h.network().await.unwrap().outage(), Some(Outage::NoRoute));
+    assert_eq!(plan.skipped.len(), 3);
+    assert!(
+        plan.skipped.iter().all(|(_, why)| *why == SkipReason::NoNetwork),
+        "{:?}",
+        plan.skipped
+    );
+
+    // And local work is untouched: the gate is about remotes, not about mood.
+    let local = h.plan(Action::Stash { include_untracked: false }, Selection::All).await.unwrap();
+    assert!(
+        !local.skipped.iter().any(|(_, why)| *why == SkipReason::NoNetwork),
+        "a stash was refused for want of a network"
+    );
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_returning_route_starts_everything_again_without_a_fetch_to_prove_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let w = world(tmp.path(), 3);
+    w.hosted_remotes();
+    let route = FixedRoute::new(false);
+    let engine = Engine::start(Config {
+        routes: Arc::new(route.clone()),
+        ..config(Duration::from_millis(100))
+    });
+    let h = engine.handle();
+    h.scan_to_completion(vec![w.repos.clone()], false).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(h.network().await.unwrap().is_down());
+
+    route.set(true);
+
+    assert!(
+        wait_for(&h, Duration::from_secs(10), |snaps| {
+            snaps.iter().all(|s| s.fetch.last_success.is_some())
+        })
+        .await,
+        "plugging the machine back in did not restart fetching"
+    );
+    assert!(!h.network().await.unwrap().is_down());
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_remote_on_this_disk_keeps_fetching_with_no_route_at_all() {
+    // The gate is about remotes, not about mood. A clone from a path on this
+    // machine is as reachable with the wifi off as with it on, and refusing it
+    // would be refusing work that was never going to fail.
+    let tmp = tempfile::tempdir().unwrap();
+    let w = world(tmp.path(), 2);
+    let engine = Engine::start(Config {
+        routes: Arc::new(FixedRoute::new(false)),
+        ..config(Duration::from_millis(100))
+    });
+    let h = engine.handle();
+    let changes = tokio::spawn(network_changes(h.subscribe(), Duration::from_secs(2)));
+    h.scan_to_completion(vec![w.repos.clone()], false).await.unwrap();
+    w.advance();
+
+    assert!(
+        wait_for(&h, Duration::from_secs(10), |snaps| {
+            snaps.iter().all(|s| s.fetch.last_success.is_some())
+        })
+        .await,
+        "a path remote was held for want of a network"
+    );
+
+    // And its successes say nothing about the network: the verdict went down
+    // once and stayed there, rather than being lifted by every local fetch.
+    // (The one change may land before the subscription does.)
+    let changes = changes.await.unwrap();
+    assert!(changes.len() <= 1, "the verdict flapped: {changes:?}");
+    assert_eq!(h.network().await.unwrap().outage(), Some(Outage::NoRoute));
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_remote_on_this_disk_cannot_answer_for_the_network() {
+    // A captive portal, and one repository cloned from a path. The path
+    // fetches keep working, and none of them is allowed to lift the verdict —
+    // which would send every hosted repository at the portal again.
+    let tmp = tempfile::tempdir().unwrap();
+    let w = world(tmp.path(), 3);
+    let was = w.go_offline();
+    w.come_back(&was[..1]);
+    let engine = Engine::start(Config {
+        fetch: FetchPolicy {
+            backoff: [Duration::from_millis(50); 4],
+            quarantine_after: 1000,
+            recheck: Duration::from_millis(200),
+            ..config(Duration::from_millis(100)).fetch
+        },
+        ..config(Duration::from_millis(100))
+    });
+    let h = engine.handle();
+    let changes = tokio::spawn(network_changes(h.subscribe(), Duration::from_secs(3)));
+    h.scan_to_completion(vec![w.repos.clone()], false).await.unwrap();
+
+    let changes = changes.await.unwrap();
+    assert!(!changes.is_empty(), "the outage was never noticed");
+    assert!(changes.iter().all(|n| n.is_down()), "a path remote lifted the verdict: {changes:?}");
+    assert_eq!(h.network().await.unwrap().outage(), Some(Outage::Unreachable));
     engine.shutdown().await;
 }

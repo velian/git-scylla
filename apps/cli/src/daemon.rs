@@ -1,7 +1,7 @@
 //! `git-scylla fetch --daemon` and `git-scylla status`.
 
 use crate::{common, render};
-use git_scylla_core::{FetchSchedule, JobOrigin, JobState, RepoSnapshot};
+use git_scylla_core::{FetchSchedule, JobOrigin, JobState, Outage, RepoSnapshot};
 use git_scylla_engine::{CacheMode, Config, Engine, Event, FetchPolicy};
 use std::io::Write;
 use std::path::PathBuf;
@@ -92,6 +92,16 @@ fn log_event(event: &Event) {
                 JobState::Skipped { .. } => return,
             };
             println!("{}  {:<28} {word}", stamp(), repo.name());
+        }
+        Event::NetworkChanged(network) => {
+            let word = match network.outage() {
+                None => "network is back — resuming",
+                Some(Outage::NoRoute) => "no route off this machine — holding until one returns",
+                Some(Outage::Unreachable) => {
+                    "nothing reachable — holding, and rechecking one repository at a time"
+                }
+            };
+            println!("{}  {:<28} {word}", stamp(), "(machine)")
         }
         Event::ReposUpserted(snaps) => {
             for s in snaps {

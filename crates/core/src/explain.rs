@@ -108,6 +108,37 @@ pub fn explain(log: &[LogLine]) -> Option<Explanation> {
     })
 }
 
+/// Whether a failed transcript says this *machine* could not get out, rather
+/// than that a remote refused it.
+///
+/// Narrower than [`FailureKind::Unreachable`] on purpose. That kind answers
+/// "why did this repository fail", and a URL pointing at something that is not
+/// a repository belongs in it. This answers "is there a network at all", and
+/// the two have different remedies: one is fixed by editing a remote, the
+/// other by joining a network. A refusal — `connection refused`, a rejected
+/// key — is *evidence of* a network and never counts here.
+///
+/// One repository's typo'd host also matches, and that is fine: the caller
+/// folds many repositories' verdicts together, where a single unreachable
+/// remote is outvoted by everything that worked.
+pub fn looks_offline(log: &[LogLine]) -> bool {
+    log.iter()
+        .filter(|l| l.stream == Stream::Stderr)
+        .any(|l| is_offline_evidence(&l.text.to_ascii_lowercase()))
+}
+
+fn is_offline_evidence(lower: &str) -> bool {
+    lower.contains("could not resolve host")
+        || lower.contains("temporary failure in name resolution")
+        || lower.contains("name or service not known")
+        || lower.contains("network is unreachable")
+        || lower.contains("network is down")
+        || lower.contains("no route to host")
+        || lower.contains("connection timed out")
+        || lower.contains("operation timed out")
+        || lower.contains("could not connect to server")
+}
+
 /// One line of git's stderr, if it says something recognisable.
 ///
 /// Ordered by specificity, not by likelihood.
@@ -183,6 +214,26 @@ mod tests {
     fn kind_of(lines: &[&str]) -> Option<FailureKind> {
         let l: Vec<(Stream, &str)> = lines.iter().map(|t| (Stream::Stderr, *t)).collect();
         explain(&log(&l)).map(|e| e.kind)
+    }
+
+    #[test]
+    fn offline_evidence_is_the_machine_failing_rather_than_a_remote_refusing() {
+        let offline = |lines: &[&str]| {
+            let l: Vec<(Stream, &str)> = lines.iter().map(|t| (Stream::Stderr, *t)).collect();
+            looks_offline(&log(&l))
+        };
+        assert!(offline(&[
+            "fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: github.com"
+        ]));
+        assert!(offline(&["ssh: connect to host github.com port 22: Network is unreachable"]));
+        assert!(offline(&["ssh: connect to host github.com port 22: Operation timed out"]));
+
+        // Something answered, so there is a network. These are the remote's
+        // verdict on this repository, and they are the repository's to fix.
+        assert!(!offline(&["ssh: connect to host localhost port 22: Connection refused"]));
+        assert!(!offline(&["git@github.com: Permission denied (publickey)."]));
+        assert!(!offline(&["fatal: 'x' does not appear to be a git repository"]));
+        assert!(!offline(&[]));
     }
 
     #[test]

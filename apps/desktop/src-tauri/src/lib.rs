@@ -21,6 +21,7 @@ macro_rules! command_handler {
             $crate::commands::start_scan,
             $crate::commands::cancel_scan,
             $crate::commands::get_snapshot,
+            $crate::commands::get_network,
             $crate::commands::select_repos,
             $crate::commands::refresh_repo,
             $crate::commands::plan,

@@ -90,6 +90,9 @@ fn code(e: &Eligibility) -> String {
             SkipReason::BareRepo => "bare".into(),
             SkipReason::Diverged => "diverg".into(),
             SkipReason::NoRemote => "norem".into(),
+            // Never produced here: the table is per-repository, and a missing
+            // route is a fact about the machine, judged once per plan.
+            SkipReason::NoNetwork => "nonet".into(),
             SkipReason::SnapshotStale => "stale".into(),
             SkipReason::NotSelected => "notsel".into(),
             SkipReason::RefNotFound(_) => "noref".into(),

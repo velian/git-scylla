@@ -49,6 +49,15 @@ impl RepoSnapshot {
         matches!(self.outcome, ProbeOutcome::Ok)
     }
 
+    /// Whether reaching this repository's remotes needs a network at all.
+    ///
+    /// `Remote::host` is `None` for a path remote, which is as reachable with
+    /// the wifi off as with it on — so anything that refuses work for want of
+    /// a network has to ask this first.
+    pub fn has_remote_host(&self) -> bool {
+        self.remotes.iter().any(|r| r.host.is_some())
+    }
+
     /// Is this older than `max_age`, or the product of a probe that failed?
     ///
     /// A snapshot from the future is treated as fresh.

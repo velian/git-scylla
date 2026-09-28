@@ -64,6 +64,70 @@ was missing a fact. That is the point: a rule that needs a resolved fact is
 enforced by the gate like every other rule, rather than by whichever step of
 resolving remembered to ask.
 
+## The network verdict
+
+Whether this machine can reach anything at all.
+
+A fact about the *machine*, and that is the whole reason it exists separately
+from a repository's fetch health. Backing off and quarantine are verdicts on a
+**repository**: it keeps refusing, so stop asking and tell the user. An outage
+is nothing of the kind — every repository in the working set fails at once, for
+a reason none of them had any part in, and quarantining forty of them leaves
+forty things for the user to restart by hand once the wifi comes back.
+
+So while the verdict is down, a failed fetch records the attempt and nothing
+else: the schedule does not move and the failure count does not rise.
+
+Two independent facts put it down, and the verdict is down while either holds.
+Each is set and lifted only by its own evidence.
+
+**No route off the machine** is asked before anything runs, of the kernel's
+routing table, in about a fifth of a millisecond. Nothing is spawned, so
+nothing fails, so there is nothing to attribute to a repository afterwards —
+and it answers for a whole plan at once, in front of the user, rather than in
+forty transcripts of the same sentence. A route coming back lifts it, with no
+fetch needed to prove anything.
+
+**Nothing reachable** is learned from fetches that already ran. It is the only
+evidence that can catch a network with a route and no service — dead DNS, a
+captive portal, a VPN half up — and only a fetch that reaches something can
+lift it, because only a fetch could have found it. A returning route must not
+lift this one: a captive portal has a perfectly good route. Fetches that fail
+while there is no route are not counted towards it — the missing route already
+explains them.
+
+Only a fetch from a remote *host* is evidence either way. A path remote
+succeeds with the wifi off, and letting it vote would lift a verdict it knows
+nothing about.
+
+The route question is asked only in the negative. A route that exists is not a
+promise that anything answers, and everything stronger has a way of being wrong
+about this machine — an ssh alias is not a hostname, an `insteadOf` rewrite is
+not the URL we read, a proxy or a VPN answers for names that resolve to nothing
+here. All of those still need a route, so "no route" is the one negative that
+cannot be a false one. Anything else is left to git, which is the only thing
+that actually knows.
+
+A repository whose remotes are all paths is never held, whichever fact is
+down. It never needed a network, and `Remote::host` is `None` for exactly
+those.
+
+## The recheck
+
+The one fetch that keeps running while the verdict is down *and* a route
+exists.
+
+Holding every repository would be a stop rather than a pause: nothing tells the
+app that DNS came back, so something has to keep asking. One hosted repository,
+at the recheck interval counted from when the verdict went down, chosen as the
+one asked longest ago — the question is about
+the machine, so any repository can answer it, and rotating is what stops a
+repository with a genuinely broken remote from answering "still down" for
+everyone else for ever.
+
+With no route there is no recheck at all. The routing table is asked instead,
+and it costs nothing.
+
 ## Hot and cold facts
 
 **Hot** is what a `RepoSnapshot` carries: one `git status` per repository, on a
